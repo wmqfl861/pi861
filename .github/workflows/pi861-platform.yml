@@ -33,16 +33,19 @@ jobs:
           cache: npm
       - name: Install without lifecycle scripts
         run: npm ci --ignore-scripts
+      - name: Hydrate upstream model data
+        run: npm run hydrate:model-data
       - name: Repository checks
         run: npm run check
       - name: Platform regression tests
+        if: always()
         run: |
           if test -d extensions/pi861/test; then
             node --experimental-strip-types --test extensions/pi861/test/*.test.ts
           else
             echo 'Plan-only commit: platform implementation not present yet.'
           fi
-      - name: Archive verified checkout for diagnostics
+      - name: Archive checkout for diagnostics
         if: always() && github.event_name == 'push'
         run: tar --exclude=.git --exclude='./node_modules/.cache' -czf /tmp/pi861-checkout.tar.gz .
       - name: Upload diagnostic checkout
