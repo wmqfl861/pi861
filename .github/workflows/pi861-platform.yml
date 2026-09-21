@@ -33,6 +33,13 @@ jobs:
           cache: npm
       - name: Install without lifecycle scripts
         run: npm ci --ignore-scripts
+      - name: Install isolated platform dependencies
+        run: |
+          if test -f extensions/pi861/package-lock.json; then
+            npm ci --prefix extensions/pi861 --ignore-scripts
+          else
+            npm install --prefix extensions/pi861 --ignore-scripts
+          fi
       - name: Hydrate upstream model data
         run: npm run hydrate:model-data
       - name: Repository checks
@@ -43,7 +50,7 @@ jobs:
           if test -d extensions/pi861/test; then
             node --experimental-strip-types --test extensions/pi861/test/*.test.ts
           else
-            echo 'Plan-only commit: platform implementation not present yet.'
+            echo 'Plan/dependency commit: platform implementation not present yet.'
           fi
       - name: Archive checkout for diagnostics
         if: always() && github.event_name == 'push'
