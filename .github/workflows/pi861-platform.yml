@@ -8,6 +8,7 @@ on:
     paths:
       - extensions/pi861/**
       - .github/workflows/pi861-platform.yml
+      - biome.json
       - PI861_PLAN.md
 
 permissions:
@@ -21,6 +22,20 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: pi861_test
+          POSTGRES_USER: pi861_test
+          POSTGRES_PASSWORD: ephemeral-ci-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U pi861_test -d pi861_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -31,35 +46,24 @@ jobs:
         with:
           node-version: 22
           cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            extensions/pi861/package-lock.json
       - name: Install without lifecycle scripts
         run: npm ci --ignore-scripts
       - name: Install isolated platform dependencies
-        run: |
-          if test -f extensions/pi861/package-lock.json; then
-            npm ci --prefix extensions/pi861 --ignore-scripts
-          else
-            npm install --prefix extensions/pi861 --ignore-scripts
-          fi
+        run: npm ci --prefix extensions/pi861 --ignore-scripts
       - name: Hydrate upstream model data
         run: npm run hydrate:model-data
       - name: Repository checks
         run: npm run check
-      - name: Platform regression tests
-        if: always()
-        run: |
-          if test -d extensions/pi861/test; then
-            node --experimental-strip-types --test extensions/pi861/test/*.test.ts
-          else
-            echo 'Plan/dependency commit: platform implementation not present yet.'
-          fi
-      - name: Archive checkout for diagnostics
-        if: always() && github.event_name == 'push'
-        run: tar --exclude=.git --exclude='./node_modules/.cache' -czf /tmp/pi861-checkout.tar.gz .
-      - name: Upload diagnostic checkout
-        if: always() && github.event_name == 'push'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: pi861-checkout-${{ github.sha }}
-          path: /tmp/pi861-checkout.tar.gz
-          if-no-files-found: error
-          retention-days: 1
+      - name: Platform type check
+        run: npm run check --prefix extensions/pi861
+      - name: Platform regression and disposable PostgreSQL tests
+        env:
+          PI_OFFLINE: "1"
+          PI861_TEST_POSTGRES: "1"
+          PI861_TEST_DATABASE_URL: postgresql://pi861_test:ephemeral-ci-only@127.0.0.1:5432/pi861_test
+        run: npm run test --prefix extensions/pi861
+      - name: Reject implicit formatting changes
+        run: git diff --exit-code -- extensions/pi861 biome.json
