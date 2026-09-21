@@ -1,0 +1,13 @@
+{
+  "name": "pi861-runtime",
+  "version": "0.1.0-alpha.1",
+  "private": true,
+  "type": "module",
+  "description": "Experimental policy, scheduling and goal extension for the pi861 fork",
+  "engines": { "node": ">=22.19.0" },
+  "pi": { "extensions": ["index.ts"] },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test test/*.test.mjs"
+  }
+}
