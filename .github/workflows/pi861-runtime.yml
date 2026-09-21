@@ -68,4 +68,21 @@ jobs:
         with:
           node-version: '22'
       - run: npm ci --ignore-scripts
+      - name: Generate provider catalog types required by the repository check
+        run: npm --prefix packages/ai run generate-models
       - run: npm run check
+
+  pi-host:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '22'
+      - name: Install isolated published Pi host
+        run: npm install --prefix "$RUNNER_TEMP/pi861-host" --no-save --no-package-lock --ignore-scripts @earendil-works/pi-coding-agent@0.86.1
+      - name: Real Pi RPC smoke without model credentials
+        working-directory: extensions/pi861
+        env:
+          PI861_TEST_PI_CLI: ${{ runner.temp }}/pi861-host/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js
+        run: node --experimental-strip-types --test test/pi-host.integration.mjs
