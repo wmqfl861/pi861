@@ -1,0 +1,55 @@
+name: Pi861 Platform
+
+on:
+  push:
+    branches: [feat/pi861-platform-v1]
+  pull_request:
+    branches: [main]
+    paths:
+      - extensions/pi861/**
+      - .github/workflows/pi861-platform.yml
+      - PI861_PLAN.md
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pi861-platform-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install without lifecycle scripts
+        run: npm ci --ignore-scripts
+      - name: Repository checks
+        run: npm run check
+      - name: Platform regression tests
+        run: |
+          if test -d extensions/pi861/test; then
+            node --experimental-strip-types --test extensions/pi861/test/*.test.ts
+          else
+            echo 'Plan-only commit: platform implementation not present yet.'
+          fi
+      - name: Archive verified checkout for diagnostics
+        if: always() && github.event_name == 'push'
+        run: tar --exclude=.git --exclude='./node_modules/.cache' -czf /tmp/pi861-checkout.tar.gz .
+      - name: Upload diagnostic checkout
+        if: always() && github.event_name == 'push'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pi861-checkout-${{ github.sha }}
+          path: /tmp/pi861-checkout.tar.gz
+          if-no-files-found: error
+          retention-days: 1
