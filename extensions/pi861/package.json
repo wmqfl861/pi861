@@ -1,0 +1,19 @@
+{
+  "name": "pi861-platform",
+  "version": "0.1.0-alpha.1",
+  "private": true,
+  "type": "module",
+  "pi": { "extensions": ["index.ts"] },
+  "scripts": {
+    "check": "../../node_modules/.bin/tsc -p tsconfig.json",
+    "test": "node --experimental-strip-types --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "pg": "8.23.0",
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "@types/pg": "8.15.6"
+  }
+}
