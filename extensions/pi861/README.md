@@ -7,10 +7,10 @@
 
 | 部分 | 状态 |
 | --- | --- |
-| `/goal` | 已实现 Pi 生命周期适配、次数限额、暂停/恢复/修改、证据报告、人工接受；通过模拟宿主测试。尚未执行真实 Pi 端到端测试。 |
+| `/goal` | 已实现 Pi 生命周期适配、次数限额、暂停/恢复/修改、证据报告、人工接受；通过模拟宿主测试及真实 Pi 0.86.1 无模型 RPC 加载/命令冒烟；真实模型目标推进仍未验证。 |
 | 联网搜索 | 已实现 Brave HTTP 适配与命令，默认关闭；固定地址、超时、取消、大小限制、来源和截断信息。HTTP 用模拟响应测试，未使用真实 API Key。 |
 | 自动记忆 | 已实现用户输入候选记录、关键词召回、手动确认/撤回、分层读取预算及分支恢复。尚无模型驱动的长期经验提炼、向量索引和自动摘要。 |
-| PostgreSQL | SQL 迁移与事务适配已实现，支持外部连接池；事务契约测试通过，实际数据库集成结果另见验证报告。不是完整认证服务。 |
+| PostgreSQL | SQL 迁移与事务适配已实现，支持外部连接池；事务契约及真实 PostgreSQL 17 集成测试通过。不是完整认证服务。 |
 | 模型路由/故障恢复 | 可执行、已测试的选择策略、状态机和缓冲推理适配接口；尚未拦截 Pi 真实流式生成，也未连接健康探测定时器。 |
 | 持续任务调度 | 可执行的单所有者任务图、租约、写入范围和完成驱动补位，支持注入真实 Worker；尚未提供跨节点网络服务或进程/工作区沙箱。 |
 | Skill/MCP | 已实现原始归档、发布版本、分支条件、工具绑定与调用时授权检查的内核；尚未接入 Pi 默认 Skill 发现、LLM 整合器和真实 MCP 传输。 |
@@ -134,8 +134,24 @@ PI861_TEST_DRIVER_ROOT=/path/to/isolated-pg-install \
 node --experimental-strip-types --test test/postgres.integration.mjs
 ```
 
-完整仓库仍须运行根 `npm run check`、真实 Pi 冒烟与真实 PostgreSQL 集成。
-模拟宿主/数据库测试不能替代这些检查。
+已在 GitHub Actions 通过根 `npm run check`、真实 Pi 无模型冒烟与 PostgreSQL 集成，
+并单独通过 97 项确定性测试和扩展类型检查。锁定的源码版本及测试范围见
+[`验证报告`](../../docs/pi861/VERIFICATION.md)。这些检查不等于真实多模型/多节点业务验收。
+
+全仓检查前需按原仓库生成模型目录类型：
+
+```sh
+npm ci --ignore-scripts
+npm --prefix packages/ai run generate-models
+npm run check
+```
+
+无模型 Pi 宿主冒烟可独立运行：
+
+```sh
+PI861_TEST_PI_CLI=/path/to/pi-coding-agent/dist/bundle/cli.js \
+node --experimental-strip-types --test test/pi-host.integration.mjs
+```
 
 ## 参考及许可
 
