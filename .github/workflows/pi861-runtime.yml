@@ -1,0 +1,71 @@
+name: Pi861 runtime
+
+on:
+  push:
+    branches: [feat/pi861-runtime-v1]
+    paths: ['extensions/pi861/**', '.github/workflows/pi861-runtime.yml']
+  pull_request:
+    branches: [main]
+    paths: ['extensions/pi861/**', '.github/workflows/pi861-runtime.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pi861-runtime-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deterministic:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '22'
+      - name: Install isolated test compiler
+        run: npm install --prefix "$RUNNER_TEMP/pi861-tools" --no-save --no-package-lock --ignore-scripts typescript@5.9.3 @types/node@22.19.19
+      - name: Type check extension
+        working-directory: extensions/pi861
+        run: node "$RUNNER_TEMP/pi861-tools/node_modules/typescript/bin/tsc" --noEmit --typeRoots "$RUNNER_TEMP/pi861-tools/node_modules/@types"
+      - name: Deterministic tests without model or MCP credentials
+        working-directory: extensions/pi861
+        run: node --experimental-strip-types --test test/*.test.mjs
+
+  postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: pi861_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: test-only
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d pi861_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '22'
+      - name: Install isolated PostgreSQL test driver
+        run: npm install --prefix "$RUNNER_TEMP/pi861-driver" --no-save --no-package-lock --ignore-scripts pg@8.16.3
+      - name: Integration against disposable local PostgreSQL
+        working-directory: extensions/pi861
+        env:
+          PI861_ALLOW_TEST_DATABASE: '1'
+          PI861_TEST_POSTGRES_URL: postgresql://postgres:test-only@127.0.0.1:5432/pi861_test
+          PI861_TEST_DRIVER_ROOT: ${{ runner.temp }}/pi861-driver
+        run: node --experimental-strip-types --test test/postgres.integration.mjs
+
+  repository-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '22'
+      - run: npm ci --ignore-scripts
+      - run: npm run check
