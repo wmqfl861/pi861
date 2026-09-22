@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, linkSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -41,8 +41,30 @@ test("source changing during compilation rejects the stale candidate", async t =
   } }, new AbortController().signal), /changed/);
 });
 test("symbolic links are not traversed during Skill installation", async t => {
-  const { repo, source } = setup(t); symlinkSync("/tmp", join(source, "outside"));
+  const { repo, source } = setup(t);
+  try { symlinkSync("/tmp", join(source, "outside")); }
+  catch (error) {
+    // Windows without developer mode cannot create symlinks at all; the guard itself stays untested here.
+    if (error.code === "EPERM") return t.skip(`symlink creation not permitted on this host: ${error.message}`);
+    throw error;
+  }
   await assert.rejects(repo.install(source, { id: "a", revision: "auto", group: "debug" }), /symlinks/);
+});
+test("hardlinked files are rejected during Skill installation", async t => {
+  const { repo, source } = setup(t);
+  const target = join(source, "linked.md");
+  writeFileSync(target, "shared content");
+  const alias = join(source, "alias.md");
+  linkSync(target, alias);
+  await assert.rejects(repo.install(source, { id: "a", revision: "auto", group: "debug" }), /limits|special files/);
+});
+test("install works from directories whose path contains spaces", async t => {
+  const { directory, repo } = setup(t);
+  const spaced = join(directory, "skill source with spaces");
+  mkdirSync(spaced); writeFileSync(join(spaced, "SKILL.md"), "---\nname: spaced\ndescription: never exposed\n---\nWorks from a spaced path.");
+  const installed = await repo.install(spaced, { id: "spaced", revision: "auto", group: "debug" });
+  assert.equal(installed.files.length, 1);
+  assert.ok((await repo.original("spaced", installed.revision)).files.some(f => f.path === "SKILL.md"));
 });
 test("Skill activation registers real MCP tools lazily and enforces current grants", async t => {
   const { repo } = setup(t);

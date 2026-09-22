@@ -58,7 +58,8 @@ export class SkillRepository {
 					walk(relative ? `${relative}/${name}` : name);
 				}
 			} else {
-				if (!stat.isFile() || stat.size > 2_097_152 || files.length >= 1000 || bytes + stat.size > 16_777_216) throw new Error("Skill archive exceeds limits or contains special files");
+				// Hardlinks let the archived bytes mutate through another path after installation.
+				if (!stat.isFile() || stat.nlink > 1 || stat.size > 2_097_152 || files.length >= 1000 || bytes + stat.size > 16_777_216) throw new Error("Skill archive exceeds limits or contains special files");
 				const content = readFileSync(path);
 				bytes += content.length;
 				files.push({ path: relative, base64: content.toString("base64"), bytes: content.length, sha256: createHash("sha256").update(content).digest("hex") });
