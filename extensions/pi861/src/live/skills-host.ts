@@ -30,9 +30,19 @@ export interface CapabilityOptions {
 }
 function requireText(value: unknown): string { if (typeof value !== "string" || !value.trim()) throw new Error("Nonempty string required"); return value; }
 function array(value: unknown): string[] { if (!Array.isArray(value) || value.some((part) => typeof part !== "string")) throw new Error("String array required"); return value; }
-function bindingName(binding: ToolBinding): string { return `pi861_mcp_${digest([binding.toolId, binding.accountId, binding.resourceId]).slice(0, 20)}`; }
+/** Full dispatch identity: one server tool used by two accounts must never share a metadata entry. */
+function bindingKey(binding: ToolBinding): string { return digest([binding.toolId, binding.accountId, binding.resourceId]); }
+function bindingName(binding: ToolBinding): string { return `pi861_mcp_${bindingKey(binding).slice(0, 20)}`; }
 
 export function installCapabilities(pi: CapabilityHost, options: CapabilityOptions): { close(): void } {
+	// Two clients for one (server id, account) pair would make dispatch ambiguous; binding resolution
+	// legitimately uses different accounts of the same server id, but never two clients for the same account.
+	const endpoints = new Set<string>();
+	for (const client of options.clients) {
+		const endpoint = `${client.server.id}\u0000${client.server.accountId}`;
+		if (endpoints.has(endpoint)) throw new Error(`Duplicate MCP endpoint identity for server ${client.server.id} and account ${client.server.accountId}`);
+		endpoints.add(endpoint);
+	}
 	const activations = new Map<string, Activation>();
 	const registered = new Set<string>();
 	let initial: string[] = [];
@@ -59,7 +69,9 @@ export function installCapabilities(pi: CapabilityHost, options: CapabilityOptio
 			const name = binding.toolId.slice(client.server.id.length + 1);
 			const tool = (await client.tools(signal)).find((tool) => tool.name === name);
 			if (!tool || tool.schemaHash !== binding.schemaHash) throw new Error("MCP metadata changed; rebuild binding");
-			map.set(binding.toolId, { client, tool });
+			// Keyed by the complete binding identity: the same toolId under another account resolves
+			// to that account's client and must not overwrite this entry.
+			map.set(bindingKey(binding), { client, tool });
 		}
 		return map;
 	}
@@ -80,23 +92,33 @@ export function installCapabilities(pi: CapabilityHost, options: CapabilityOptio
 		const catalog = await options.repository.catalog();
 		const planned = await options.repository.bindingPlan(id, revision, branches, phase, options.role(), options.environment);
 		const metadata = await describe(planned, signal);
-		const definitions = [...metadata.entries()].map(([id, entry]) => ({ id, schemaHash: entry.tool.schemaHash }));
+		const definitions = planned.map((binding) => {
+			const entry = metadata.get(bindingKey(binding));
+			if (!entry) throw new Error("Tool metadata missing");
+			return { id: binding.toolId, schemaHash: entry.tool.schemaHash };
+		});
 		const activation = catalog.activate(options.role(), id, revision, branches, phase, options.environment, definitions);
 		if (generation !== epoch) throw new Error("Session changed during skill activation");
 		for (const binding of activation.tools) {
-			const entry = metadata.get(binding.toolId);
+			const entry = metadata.get(bindingKey(binding));
 			if (!entry) throw new Error("Tool metadata missing");
 			const name = bindingName(binding);
+			if (registered.has(name)) continue; // One shared registration serves every activation of this binding identity.
 			registered.add(name);
+			const identity = digest(binding);
 			pi.registerTool({ name, label: entry.tool.name,
 				description: `${entry.tool.description}\nBound resource: ${binding.resourceId}. Use only for the activated Skill.`,
 				parameters: entry.tool.inputSchema,
 				execute: async (callId, args, inputSignal, _onUpdate, ctx) => {
-					const current = activations.get(activation.skillId);
+					const role = options.role();
+					// Any live activation that still carries this exact binding authorizes the call, so
+					// several Skills sharing one binding cannot disable each other on deactivate.
+					const current = [...activations.values()].find((activation) => role.skillIds.includes(activation.skillId) &&
+						activation.tools.some((tool) => digest(tool) === identity));
 					if (!current) throw new Error("Skill is no longer active");
 					const effectiveSignal = inputSignal ?? new AbortController().signal;
 					const available = await entry.client.tools(effectiveSignal, true);
-					authorizeInvocation(current, options.role(), available.map((tool) => ({ id: `${entry.client.server.id}/${tool.name}`, schemaHash: tool.schemaHash })), binding);
+					authorizeInvocation(current, role, available.map((tool) => ({ id: `${entry.client.server.id}/${tool.name}`, schemaHash: tool.schemaHash })), binding);
 					enforceResource(binding, args);
 					const dispatch = async () => {
 					const response = await entry.client.call(entry.tool.name, args, binding.schemaHash, effectiveSignal);
