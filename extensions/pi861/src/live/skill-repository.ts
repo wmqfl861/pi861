@@ -361,7 +361,10 @@ export class SkillRepository {
 		if (!candidate) throw new Error("Candidate not found");
 		return candidate;
 	}
-	async publish(id: string, validate: (skill: RuntimeSkill) => Promise<unknown>): Promise<RuntimeSkill> {
+	async publish(
+		id: string,
+		validate: (skill: RuntimeSkill) => Promise<{ evidence: AcceptanceEvidence[] }>,
+	): Promise<RuntimeSkill> {
 		const candidate = await this.candidate(id);
 		if (candidate.state !== "candidate") throw new Error("Candidate not found");
 		const checks = validateSkillEvidence(candidate.skill, await validate(structuredClone(candidate.skill)));
