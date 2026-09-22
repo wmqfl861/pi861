@@ -9,6 +9,7 @@ import { SkillRepository, emptySkillState } from "../src/live/skill-repository.t
 import { McpClient } from "../src/live/mcp.ts";
 import { installCapabilities } from "../src/live/skills-host.ts";
 import { digest } from "../src/memory.ts";
+import { runSkillValidation, recordSkillAcceptance } from "../src/live/skill-validation.ts";
 function setup(t) {
   const directory = mkdtempSync(join(tmpdir(), "pi861-skill-")); t.after(() => rmSync(directory, { recursive: true, force: true }));
   const source = join(directory, "source"); mkdirSync(source); writeFileSync(join(source, "SKILL.md"), "---\nname: debug\ndescription: NEVER_AUTO_EXPOSE_ORIGINAL\n---\nRead the error. Preserve evidence. Validate the fix.");
@@ -33,8 +34,36 @@ function harness(t, options) {
 const activateSkill = (h, skillId, revision, branches, phase) =>
   h.tools.get("pi861_capabilities").execute("act", { action: "activate", skillId, revision, branches, phase });
 const staticCompiler = skill => ({ async compile() { return structuredClone(skill); } });
-const publish = (repo, candidate) => repo.publish(candidate.id, async () => ({ passed: true, evidence: ["fixture"] }));
-const bindingName = binding => `pi861_mcp_${digest([binding.toolId, binding.accountId, binding.resourceId]).slice(0, 20)}`;
+const owner = { producedBy: { tenantId: "local", projectId: "fixture", goalId: "validation", runId: "one", taskId: "skill", attempt: 1 }, scope: "project:fixture", recordedBy: "fixture-checker" };
+// These expectations apply only to the deterministic local fixture, not arbitrary MCP servers.
+async function publish(repo, candidate, clients = []) {
+  return repo.publish(candidate.id, async skill => {
+    let submits = 0;
+    const cases = skill.branches.flatMap(branch => {
+      const phases = [...new Set(branch.tools.map(binding => binding.phase))];
+      return (phases.length ? phases : ["execute"]).map(phase => ({ branchId: branch.id, phase,
+        instructionIncludes: ["Preserve evidence"], calls: branch.tools.filter(binding => binding.phase === phase).map(binding => {
+          const project = binding.resourceId.replace("project:", "");
+          const client = clients.find(client => binding.toolId.startsWith(`${client.server.id}/`) && client.server.accountId === binding.accountId);
+          assert.ok(client, "bound fixture publication needs a real local client");
+          const account = client.server.transport.process.env?.MCP_ACCOUNT;
+          const text = binding.toolId.endsWith("/submit") ? `submitted change ${++submits}` : `looked up ${project}${account ? ` via account ${account}` : ""}`;
+          return { binding, args: { project }, expected: { content: [{ type: "text", text }] } };
+        }) }));
+    });
+    const result = await runSkillValidation(skill, { ...owner, approvedBindings: candidate.approvedBindings,
+      environment: ["browser"], cases, invoke: (binding, args, signal) => {
+        const client = clients.find(client => binding.toolId.startsWith(`${client.server.id}/`) && client.server.accountId === binding.accountId);
+        return client.call(binding.toolId.slice(client.server.id.length + 1), args, binding.schemaHash, signal);
+      } }, signal());
+    return { evidence: [...result.evidence, recordSkillAcceptance(skill, { ...owner, recordedBy: "fixture-human", summary: "Simulated human acceptance in deterministic test" })] };
+  });
+}
+const bindingName = (h, binding, skillId) => {
+  const entry = [...h.tools.values()].find(tool => h.activeNames().includes(tool.name) && tool.description.includes(binding.resourceId) && tool.description.includes(binding.toolId) && (!skillId || tool.description.includes(`Skill: ${skillId}@`)));
+  assert.ok(entry, `active tool not found for ${binding.toolId}/${binding.accountId}/${skillId ?? ""}`);
+  return entry.name;
+};
 const compiler = { async compile(input) { assert.ok(input.documents.some(d => d.content.includes("Preserve evidence"))); return { id: "debug", revision: "tmp", title: "Debug", category: "development/debug", instructions: "Preserve evidence and validate fixes.", sources: [], branches: [{ id: "general", when: "Program failure; not unrelated research", instructions: "Reproduce, diagnose and verify", environment: [], conflictsWith: [], tools: [] }] }; } };
 test("install archives full bytes; updates include changed scripts", async t => {
   const { repo, source } = setup(t); writeFileSync(join(source, "script.py"), "print('one')");
@@ -51,7 +80,8 @@ test("source is not discoverable until a candidate passes trusted publication", 
   const candidate = await repo.compile("debug", compiler, new AbortController().signal);
   assert.equal((await repo.catalog()).browse(role).length, 0);
   await assert.rejects(repo.publish(candidate.id, async () => ({ passed: false, evidence: [] })), /validation/);
-  await repo.publish(candidate.id, async () => ({ passed: true, evidence: ["test:passed"] }));
+  await assert.rejects(repo.publish(candidate.id, async () => ({ passed: true, evidence: ["test:passed"] })), /evidence/);
+  await publish(repo, candidate);
   assert.deepEqual((await repo.browse(role)).categories, ["development"]);
   assert.equal((await repo.browse(role, "development/debug")).skills[0].id, "debug");
   assert.ok(!JSON.stringify(await repo.browse(role)).includes("NEVER_AUTO_EXPOSE"));
@@ -64,7 +94,7 @@ test("source changing during compilation rejects the stale candidate", async t =
 });
 test("symbolic links are not traversed during Skill installation", async t => {
   const { repo, source } = setup(t);
-  try { symlinkSync("/tmp", join(source, "outside")); }
+  try { symlinkSync(tmpdir(), join(source, "outside"), process.platform === "win32" ? "junction" : "dir"); }
   catch (error) {
     // Windows without developer mode cannot create symlinks at all; the guard itself stays untested here.
     if (error.code === "EPERM") return t.skip(`symlink creation not permitted on this host: ${error.message}`);
@@ -121,7 +151,7 @@ test("capability factory does not call unbound Pi action methods",()=>{
 // AX6 coverage: minimal exposure, per-phase registration, cross-account dispatch, shared bindings,
 // schema changes, hidden-name gating and zero business writes while browsing (requirements R5.1-R5.8).
 const branch = (id, binding, extra = {}) => ({ id, when: `branch ${id}`, instructions: `Use ${binding.toolId}.`, environment: [], conflictsWith: [], tools: [binding], ...extra });
-const runtimeSkill = (id, branches) => ({ id, revision: "candidate", title: id, category: `development/${id}`, instructions: `${id} instructions.`, sources: [], branches });
+const runtimeSkill = (id, branches) => ({ id, revision: "candidate", title: id, category: `development/${id}`, instructions: `${id} instructions. Preserve evidence and validate fixes.`, sources: [], branches });
 
 test("activation registers only bound tools and browsing stays free of business writes", async t => {
   const { repo } = setup(t);
@@ -134,7 +164,7 @@ test("activation registers only bound tools and browsing stays free of business 
   });
   const id = await repo.publishMcp("local", "a", metadata, bindings);
   const role = { id: "developer", skillIds: [id], grants: [{ toolId: "local/lookup", accountId: "a", resourceIds: ["project:p"] }, { toolId: "local/stats", accountId: "a", resourceIds: ["project:p"] }] };
-  const h = harness(t, { repository: repo, role: () => role, clients: [client], environment: [], resourceRules: bindings.map(binding => ({ ...binding, equals: { project: "p" } })) });
+  const h = harness(t, { repository: repo, role: () => role, clients: [client], environment: [], resourceRules: bindings.map(binding => ({ ...binding, endpointConfined: true })) });
   assert.deepEqual(h.activeNames(), []); // nothing registered before activation
   const browse = await h.tools.get("pi861_capabilities").execute("b", { action: "browse" });
   assert.ok(browse.content[0].text.includes("tools")); // shallow directory only
@@ -145,8 +175,8 @@ test("activation registers only bound tools and browsing stays free of business 
   await activateSkill(h, id, published.revision, branches, "execute");
   const names = h.activeNames();
   assert.equal(names.length, 2); // five server tools, two bound: exactly the two bound names appear
-  const statsName = bindingName(bindings[1]);
-  const payload = JSON.parse((await h.tools.get(statsName).execute("c", { project: "p" })).content[0].text);
+  const statsName = bindingName(h, bindings[1]);
+  const payload = JSON.parse((await h.tools.get(statsName).execute("c", {})).content[0].text);
   const counters = JSON.parse(payload.content[0].text); // host text wraps the MCP result text
   assert.equal(counters.submits, 0); // browse, branches and activation performed zero business writes
   assert.ok(counters.lists >= 1 && counters.calls >= 1); // read traffic did happen
@@ -162,7 +192,7 @@ test("only the requested phase's tools are registered", async t => {
     branch("execute", { toolId: "local/submit", accountId: "a", resourceId: "project:p", schemaHash: hash("submit"), phase: "execute" }),
   ]);
   await repo.install(source, { id: "p", revision: "auto", group: "phased" });
-  await publish(repo, await repo.compile("phased", staticCompiler(skill), signal()));
+  await publish(repo, await repo.compile("phased", staticCompiler(skill), signal(), { approvedBindings: skill.branches.flatMap(branch => branch.tools) }), [client]);
   const role = { id: "developer", skillIds: ["phased"], grants: [{ toolId: "local/lookup", accountId: "a", resourceIds: ["project:p"] }, { toolId: "local/submit", accountId: "a", resourceIds: ["project:p"] }] };
   const h = harness(t, { repository: repo, role: () => role, clients: [client], environment: [], resourceRules: [
     { toolId: "local/lookup", accountId: "a", resourceId: "project:p", equals: { project: "p" } },
@@ -183,7 +213,7 @@ test("cross-account bindings dispatch through their own account's client", async
   const bindA = { toolId: "dup/lookup", accountId: "a", resourceId: "project:pa", schemaHash, phase: "execute" };
   const bindB = { toolId: "dup/lookup", accountId: "b", resourceId: "project:pb", schemaHash, phase: "execute" };
   await repo.install(source, { id: "c", revision: "auto", group: "cross" });
-  await publish(repo, await repo.compile("cross", staticCompiler(runtimeSkill("cross", [branch("via-a", bindA), branch("via-b", bindB)])), signal()));
+  await publish(repo, await repo.compile("cross", staticCompiler(runtimeSkill("cross", [branch("via-a", bindA), branch("via-b", bindB)])), signal(), { approvedBindings: [bindA, bindB] }), [clientA, clientB]);
   const role = { id: "developer", skillIds: ["cross"], grants: [
     { toolId: "dup/lookup", accountId: "a", resourceIds: ["project:pa"] }, { toolId: "dup/lookup", accountId: "b", resourceIds: ["project:pb"] }] };
   const h = harness(t, { repository: repo, role: () => role, clients: [clientA, clientB], environment: [], resourceRules: [
@@ -194,8 +224,8 @@ test("cross-account bindings dispatch through their own account's client", async
   await activateSkill(h, "cross", published.revision, ["via-a", "via-b"], "execute");
   assert.equal(h.activeNames().length, 2);
   // Each registered name must reach the account named in its own binding, not the last one described.
-  const viaA = (await h.tools.get(bindingName(bindA)).execute("c", { project: "pa" })).content[0].text;
-  const viaB = (await h.tools.get(bindingName(bindB)).execute("c", { project: "pb" })).content[0].text;
+  const viaA = (await h.tools.get(bindingName(h, bindA)).execute("c", { project: "pa" })).content[0].text;
+  const viaB = (await h.tools.get(bindingName(h, bindB)).execute("c", { project: "pb" })).content[0].text;
   assert.match(viaA, /via account acct-a/);
   assert.match(viaB, /via account acct-b/);
 });
@@ -209,7 +239,7 @@ test("same-named tools on different servers keep separate registrations", async 
   const b1 = { toolId: "one/lookup", accountId: "acct", resourceId: "project:p", schemaHash: hashOne, phase: "execute" };
   const b2 = { toolId: "two/lookup", accountId: "acct", resourceId: "project:q", schemaHash: hashTwo, phase: "execute" };
   await repo.install(source, { id: "s", revision: "auto", group: "twin" });
-  await publish(repo, await repo.compile("twin", staticCompiler(runtimeSkill("twin", [branch("one", b1), branch("two", b2)])), signal()));
+  await publish(repo, await repo.compile("twin", staticCompiler(runtimeSkill("twin", [branch("one", b1), branch("two", b2)])), signal(), { approvedBindings: [b1, b2] }), [one, two]);
   const role = { id: "developer", skillIds: ["twin"], grants: [
     { toolId: "one/lookup", accountId: "acct", resourceIds: ["project:p"] }, { toolId: "two/lookup", accountId: "acct", resourceIds: ["project:q"] }] };
   const h = harness(t, { repository: repo, role: () => role, clients: [one, two], environment: [], resourceRules: [
@@ -218,9 +248,9 @@ test("same-named tools on different servers keep separate registrations", async 
   ] });
   const published = (await repo.catalog()).browse(role)[0];
   await activateSkill(h, "twin", published.revision, ["one", "two"], "execute");
-  assert.deepEqual(h.activeNames().sort(), [bindingName(b1), bindingName(b2)].sort());
-  assert.match((await h.tools.get(bindingName(b1)).execute("c", { project: "p" })).content[0].text, /via account server-one/);
-  assert.match((await h.tools.get(bindingName(b2)).execute("c", { project: "q" })).content[0].text, /via account server-two/);
+  assert.deepEqual(h.activeNames().sort(), [bindingName(h, b1), bindingName(h, b2)].sort());
+  assert.match((await h.tools.get(bindingName(h, b1)).execute("c", { project: "p" })).content[0].text, /via account server-one/);
+  assert.match((await h.tools.get(bindingName(h, b2)).execute("c", { project: "q" })).content[0].text, /via account server-two/);
 });
 
 test("two Skills sharing one binding do not disable each other", async t => {
@@ -229,8 +259,8 @@ test("two Skills sharing one binding do not disable each other", async t => {
   const binding = { toolId: "local/lookup", accountId: "a", resourceId: "project:p", schemaHash: (await client.tools(signal())).find(tool => tool.name === "lookup").schemaHash, phase: "execute" };
   await repo.install(source, { id: "s1", revision: "auto", group: "share1" });
   await repo.install(source, { id: "s2", revision: "auto", group: "share2" });
-  await publish(repo, await repo.compile("share1", staticCompiler(runtimeSkill("shared1", [branch("only", binding)])), signal()));
-  await publish(repo, await repo.compile("share2", staticCompiler(runtimeSkill("shared2", [branch("only", binding)])), signal()));
+  await publish(repo, await repo.compile("share1", staticCompiler(runtimeSkill("shared1", [branch("only", binding)])), signal(), { approvedBindings: [binding] }), [client]);
+  await publish(repo, await repo.compile("share2", staticCompiler(runtimeSkill("shared2", [branch("only", binding)])), signal(), { approvedBindings: [binding] }), [client]);
   const role = { id: "developer", skillIds: ["shared1", "shared2"], grants: [{ toolId: "local/lookup", accountId: "a", resourceIds: ["project:p"] }] };
   const h = harness(t, { repository: repo, role: () => role, clients: [client], environment: [], resourceRules: [{ ...binding, equals: { project: "p" } }] });
   const catalog = await repo.catalog();
@@ -238,12 +268,15 @@ test("two Skills sharing one binding do not disable each other", async t => {
     const published = catalog.browse(role).find(item => item.id === skillId);
     await activateSkill(h, skillId, published.revision, ["only"], "execute");
   }
-  const name = bindingName(binding);
+  const name = bindingName(h, binding, "shared1");
+  const secondName = bindingName(h, binding, "shared2");
+  assert.notEqual(name, secondName);
+  assert.match((await h.tools.get(secondName).execute("other", { project: "p" })).content[0].text, /looked up p/);
   assert.match((await h.tools.get(name).execute("c1", { project: "p" })).content[0].text, /looked up p/);
   await h.tools.get("pi861_capabilities").execute("d1", { action: "deactivate", skillId: "shared2" });
   assert.match((await h.tools.get(name).execute("c2", { project: "p" })).content[0].text, /looked up p/); // shared1 still supports the binding
   assert.equal(h.handlers.get("tool_call")({ toolName: name }), undefined);
-  assert.equal(h.handlers.get("tool_call")({ toolName: "pi861_mcp_never_registered" }), undefined); // never-activated names are not gated here
+  assert.deepEqual(h.handlers.get("tool_call")({ toolName: "pi861_mcp_never_registered" }), { block: true, reason: "MCP capability is not active" });
   await h.tools.get("pi861_capabilities").execute("d2", { action: "deactivate", skillId: "shared1" });
   assert.deepEqual(h.handlers.get("tool_call")({ toolName: name }), { block: true, reason: "MCP capability is not active" });
   await assert.rejects(h.tools.get(name).execute("c3", { project: "p" }), /no longer active/);
@@ -259,7 +292,7 @@ test("a schema change blocks live bindings and refuses reactivation", async t =>
   const h = harness(t, { repository: repo, role: () => role, clients: [client], environment: [], resourceRules: [{ ...binding, equals: { project: "p" } }] });
   const published = (await repo.catalog()).browse(role)[0];
   await activateSkill(h, id, published.revision, (await repo.catalog()).branches(role, id).map(item => item.id), "execute");
-  const name = bindingName(binding);
+  const name = bindingName(h, binding);
   assert.match((await h.tools.get(name).execute("c", { project: "p" })).content[0].text, /looked up p/);
   writeFileSync(control, "v2"); // the server flips its input schema
   await assert.rejects(h.tools.get(name).execute("c2", { project: "p" }), /schema changed/);
@@ -308,7 +341,7 @@ test("environment-gated and mutually exclusive branches select correctly", async
   const { repo, source } = setup(t);
   await repo.install(source, { id: "e", revision: "auto", group: "envs" });
   const skill = runtimeSkill("envskill", [
-    { id: "general", when: "Program failure", instructions: "General debugging.", environment: [], conflictsWith: [], tools: [] },
+    { id: "general", when: "Program failure", instructions: "General debugging.", environment: [], conflictsWith: ["browser"], tools: [] },
     { id: "browser", when: "Browser-only failure", instructions: "Collect console evidence.", environment: ["browser"], conflictsWith: ["general"], tools: [] },
     { id: "console", when: "Console logs needed", instructions: "Read the console.", environment: ["browser"], conflictsWith: [], tools: [] },
   ]);
@@ -316,7 +349,7 @@ test("environment-gated and mutually exclusive branches select correctly", async
   const role = { id: "developer", skillIds: ["envskill"], grants: [] };
   const published = (await repo.catalog()).browse(role)[0];
   const plain = harness(t, { repository: repo, role: () => role, clients: [], environment: [], resourceRules: [] });
-  await assert.rejects(activateSkill(plain, "envskill", published.revision, ["general", "browser"], "execute"), /prerequisites/);
+  await assert.rejects(activateSkill(plain, "envskill", published.revision, ["browser"], "execute"), /prerequisites/);
   await activateSkill(plain, "envskill", published.revision, ["general"], "execute"); // available without the browser environment
   const withBrowser = harness(t, { repository: repo, role: () => role, clients: [], environment: ["browser"], resourceRules: [] });
   await activateSkill(withBrowser, "envskill", published.revision, ["browser"], "execute"); // available with it
