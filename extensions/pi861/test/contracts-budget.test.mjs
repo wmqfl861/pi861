@@ -85,6 +85,32 @@ test("input token limits count cache reads and settled usage together", () => {
 	assert.throws(() => budget.reserve(null, "execution", { inputTokens: 50, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0 }, 2), BudgetExhausted);
 });
 
+test("F03 restored reservations retain unique ids and enforce held attempt capacity", () => {
+	const limits = { maxTotalCostUsd: 10, maxAttempts: 2, maxInputTokens: 100, maxOutputTokens: 100 };
+	const before = new TaskTreeBudget(limits);
+	const old = before.reserve(null, "execution", usage(1), 1);
+	const restored = new TaskTreeBudget(limits);
+	restored.restore(before.exportState());
+	const next = restored.reserve(null, "planning", usage(1), 2);
+	assert.notEqual(next.reservationId, old.reservationId);
+	assert.throws(() => restored.reserve(null, "probe", usage(1), 3), BudgetExhausted);
+	const again = new TaskTreeBudget(limits);
+	again.restore(restored.exportState());
+	again.settle(old.reservationId, usage(1));
+	again.settle(next.reservationId, usage(1));
+	assert.equal(again.usage.attempts, 2);
+	assert.throws(() => again.reserve(null, "probe", usage(1), 4), BudgetExhausted);
+});
+
+test("budget reservation views cannot reduce held capacity", () => {
+	const budget = new TaskTreeBudget({ maxTotalCostUsd: 1, maxAttempts: 10, maxInputTokens: 100, maxOutputTokens: 100 });
+	const reservation = budget.reserve(null, "execution", usage(1), 1);
+	reservation.estimate.costUsd = 0;
+	budget.openReservations()[0].estimate.costUsd = 0;
+	budget.exportState().reservations[0].estimate.costUsd = 0;
+	assert.throws(() => budget.reserve(null, "planning", usage(0.1), 2), BudgetExhausted);
+});
+
 test("snapshots round-trip task hierarchy, subtree limits and unknown counts", () => {
 	const budget = new TaskTreeBudget({ maxTotalCostUsd: 10, maxAttempts: 10, maxInputTokens: 1000, maxOutputTokens: 1000 });
 	budget.registerTask("parent", null, { maxTotalCostUsd: 1, maxAttempts: 4, maxInputTokens: 1000, maxOutputTokens: 1000 });

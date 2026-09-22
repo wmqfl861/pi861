@@ -1,5 +1,5 @@
-import { digest } from "./hash.ts";
 import type { FullToolIdentity } from "./capability.ts";
+import { digest } from "./hash.ts";
 
 /**
  * C5 operation contract: side-effecting tool calls run under a stable business operation id with
@@ -44,11 +44,19 @@ export class OperationLedger {
 		}
 		const existing = this.operations.get(operationId);
 		if (existing) {
-			if (digest(existing.tool) !== digest(tool) || existing.inputDigest !== inputDigest) throw new OperationConflict(operationId);
+			if (digest(existing.tool) !== digest(tool) || existing.inputDigest !== inputDigest)
+				throw new OperationConflict(operationId);
 			return { ...existing };
 		}
-		const operation: BusinessOperation = { operationId, tool: structuredClone(tool), inputDigest, status: "prepared",
-			createdAt: now, updatedAt: now, reconciled: false };
+		const operation: BusinessOperation = {
+			operationId,
+			tool: structuredClone(tool),
+			inputDigest,
+			status: "prepared",
+			createdAt: now,
+			updatedAt: now,
+			reconciled: false,
+		};
 		this.operations.set(operationId, operation);
 		return { ...operation };
 	}
@@ -75,9 +83,17 @@ export class OperationLedger {
 	}
 
 	/** Trusted reconciliation path only; resolves an unknown outcome exactly once. */
-	reconcile(operationId: string, outcome: { status: "succeeded"; resultDigest: string } | { status: "failed"; error: string } | { status: "not-executed" }, now: number): void {
+	reconcile(
+		operationId: string,
+		outcome:
+			| { status: "succeeded"; resultDigest: string }
+			| { status: "failed"; error: string }
+			| { status: "not-executed" },
+		now: number,
+	): void {
 		const operation = this.require(operationId);
-		if (operation.status !== "unknown" || !Number.isFinite(now)) throw new Error(`Operation is not awaiting reconciliation: ${operationId}`);
+		if (operation.status !== "unknown" || !Number.isFinite(now))
+			throw new Error(`Operation is not awaiting reconciliation: ${operationId}`);
 		operation.reconciled = true;
 		operation.updatedAt = now;
 		if (outcome.status === "succeeded") {
@@ -109,10 +125,16 @@ export class OperationLedger {
 		if (snapshot.version !== 1 || !Array.isArray(snapshot.operations)) throw new Error("Invalid operation snapshot");
 		const restored = new Map<string, BusinessOperation>();
 		for (const operation of snapshot.operations) {
-			if (!operation.operationId || restored.has(operation.operationId) || !operation.inputDigest ||
-				!Number.isFinite(operation.createdAt) || !Number.isFinite(operation.updatedAt) ||
+			if (
+				!operation.operationId ||
+				restored.has(operation.operationId) ||
+				!operation.inputDigest ||
+				!Number.isFinite(operation.createdAt) ||
+				!Number.isFinite(operation.updatedAt) ||
 				!["prepared", "dispatched", "succeeded", "failed", "unknown"].includes(operation.status) ||
-				typeof operation.reconciled !== "boolean") throw new Error("Invalid operation snapshot entry");
+				typeof operation.reconciled !== "boolean"
+			)
+				throw new Error("Invalid operation snapshot entry");
 			restored.set(operation.operationId, { ...operation });
 		}
 		this.operations.clear();

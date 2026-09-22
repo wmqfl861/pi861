@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import { digest } from "./hash.ts";
-import type { ExecutionIdentity } from "./identity.ts";
 
 /**
  * C2 lifecycle contract: pause, cancel, resume, session generations, leases and execution
@@ -51,28 +50,37 @@ export class SessionLifecycle {
 	private readonly dispatches = new Map<string, DispatchRecord>();
 
 	constructor(sessionId: string, openedAt: number) {
-		if (!sessionId || sessionId.length > 200 || !Number.isFinite(openedAt)) throw new Error("Invalid session identity");
+		if (!sessionId || sessionId.length > 200 || !Number.isFinite(openedAt))
+			throw new Error("Invalid session identity");
 		this.sessionId = sessionId;
 		this.openedAt = openedAt;
 		this.transitionLog.push({ kind: "open", at: openedAt, detail: "" });
 	}
 
-	get currentPhase(): ControlledPhase { return this.phase; }
-	get currentToken(): SessionToken { return { sessionId: this.sessionId, generation: this.generation }; }
+	get currentPhase(): ControlledPhase {
+		return this.phase;
+	}
+	get currentToken(): SessionToken {
+		return { sessionId: this.sessionId, generation: this.generation };
+	}
 	get outstandingDispatches(): DispatchRecord[] {
 		return [...this.dispatches.values()].filter((record) => record.settledAt === undefined);
 	}
-	get reconciliationRequired(): boolean { return this.outstandingDispatches.length > 0; }
+	get reconciliationRequired(): boolean {
+		return this.outstandingDispatches.length > 0;
+	}
 
 	pause(reason: string, now: number): void {
-		if (this.phase !== "running" || !reason || !Number.isFinite(now)) throw new Error("Only a running session can pause");
+		if (this.phase !== "running" || !reason || !Number.isFinite(now))
+			throw new Error("Only a running session can pause");
 		this.phase = "paused";
 		this.generation++;
 		this.transitionLog.push({ kind: "pause", at: now, detail: reason });
 	}
 
 	resume(reason: string, now: number): void {
-		if (this.phase !== "paused" || !reason || !Number.isFinite(now)) throw new Error("Only a paused session can resume");
+		if (this.phase !== "paused" || !reason || !Number.isFinite(now))
+			throw new Error("Only a paused session can resume");
 		this.phase = "running";
 		this.generation++;
 		this.transitionLog.push({ kind: "resume", at: now, detail: reason });
@@ -92,8 +100,11 @@ export class SessionLifecycle {
 		if (this.phase !== "cancelling" || !Number.isFinite(now)) throw new Error("Cancellation has not been requested");
 		this.phase = "cancelled";
 		this.transitionLog.push({
-			kind: "complete-cancel", at: now,
-			detail: this.reconciliationRequired ? "outstanding side effects require reconciliation" : "no outstanding side effects",
+			kind: "complete-cancel",
+			at: now,
+			detail: this.reconciliationRequired
+				? "outstanding side effects require reconciliation"
+				: "no outstanding side effects",
 		});
 		return { reconciliationRequired: this.reconciliationRequired };
 	}
@@ -105,15 +116,20 @@ export class SessionLifecycle {
 	}
 
 	beginExecution(now: number): ExecutionPermit {
-		if (this.phase !== "running" || !Number.isFinite(now)) throw new Error("Execution authority requires a running session");
+		if (this.phase !== "running" || !Number.isFinite(now))
+			throw new Error("Execution authority requires a running session");
 		return { permitId: randomUUID(), token: { ...this.currentToken }, issuedAt: now };
 	}
 
 	/** A permit whose generation no longer matches, or that arrives outside a running phase, is late. */
 	settleExecution(permit: ExecutionPermit, now: number): PermitOutcome {
 		if (!Number.isFinite(now)) throw new Error("Invalid settlement time");
-		if (this.phase !== "running" || permit.token.sessionId !== this.sessionId ||
-			permit.token.generation !== this.generation) return "rejected-late";
+		if (
+			this.phase !== "running" ||
+			permit.token.sessionId !== this.sessionId ||
+			permit.token.generation !== this.generation
+		)
+			return "rejected-late";
 		return "accepted";
 	}
 
@@ -132,16 +148,24 @@ export class SessionLifecycle {
 
 	exportState(): LifecycleSnapshot {
 		return {
-			version: 1, sessionId: this.sessionId, phase: this.phase, generation: this.generation,
-			openedAt: this.openedAt, transitionLog: structuredClone(this.transitionLog),
+			version: 1,
+			sessionId: this.sessionId,
+			phase: this.phase,
+			generation: this.generation,
+			openedAt: this.openedAt,
+			transitionLog: structuredClone(this.transitionLog),
 			dispatches: [...this.dispatches.values()].map((record) => ({ ...record })),
 		};
 	}
 
 	restore(snapshot: LifecycleSnapshot): void {
-		if (snapshot.version !== 1 || snapshot.sessionId !== this.sessionId ||
-			!Number.isSafeInteger(snapshot.generation) || snapshot.generation < 1 ||
-			!["running", "paused", "cancelling", "cancelled", "settled", "failed"].includes(snapshot.phase)) {
+		if (
+			snapshot.version !== 1 ||
+			snapshot.sessionId !== this.sessionId ||
+			!Number.isSafeInteger(snapshot.generation) ||
+			snapshot.generation < 1 ||
+			!["running", "paused", "cancelling", "cancelled", "settled", "failed"].includes(snapshot.phase)
+		) {
 			throw new Error("Invalid lifecycle snapshot");
 		}
 		this.phase = snapshot.phase;
@@ -150,8 +174,12 @@ export class SessionLifecycle {
 		this.transitionLog.push(...structuredClone(snapshot.transitionLog));
 		this.dispatches.clear();
 		for (const record of snapshot.dispatches) {
-			if (!record.operationDigest || !Number.isFinite(record.dispatchedAt) ||
-				(record.settledAt !== undefined && !Number.isFinite(record.settledAt))) throw new Error("Invalid dispatch snapshot");
+			if (
+				!record.operationDigest ||
+				!Number.isFinite(record.dispatchedAt) ||
+				(record.settledAt !== undefined && !Number.isFinite(record.settledAt))
+			)
+				throw new Error("Invalid dispatch snapshot");
 			this.dispatches.set(record.operationDigest, { ...record });
 		}
 	}
@@ -168,15 +196,42 @@ export interface PersistentLease {
 	expiresAt: number;
 }
 
-export function issueLease(purpose: string, owner: string, generation: number, now: number, leaseMs: number): PersistentLease {
-	if (!purpose || !owner || !Number.isSafeInteger(generation) || generation < 1 ||
-		!Number.isFinite(now) || !Number.isSafeInteger(leaseMs) || leaseMs <= 0) throw new Error("Invalid lease request");
-	return { leaseId: randomUUID(), purpose, owner, token: randomUUID(), generation, acquiredAt: now, expiresAt: now + leaseMs };
+export function issueLease(
+	purpose: string,
+	owner: string,
+	generation: number,
+	now: number,
+	leaseMs: number,
+): PersistentLease {
+	if (
+		!purpose ||
+		!owner ||
+		!Number.isSafeInteger(generation) ||
+		generation < 1 ||
+		!Number.isFinite(now) ||
+		!Number.isSafeInteger(leaseMs) ||
+		leaseMs <= 0
+	)
+		throw new Error("Invalid lease request");
+	return {
+		leaseId: randomUUID(),
+		purpose,
+		owner,
+		token: randomUUID(),
+		generation,
+		acquiredAt: now,
+		expiresAt: now + leaseMs,
+	};
 }
 
 export function leaseValid(lease: PersistentLease, generation: number, now: number): boolean {
-	return Number.isSafeInteger(generation) && lease.generation === generation &&
-		Number.isFinite(now) && lease.acquiredAt <= now && now < lease.expiresAt;
+	return (
+		Number.isSafeInteger(generation) &&
+		lease.generation === generation &&
+		Number.isFinite(now) &&
+		lease.acquiredAt <= now &&
+		now < lease.expiresAt
+	);
 }
 
 export type WakeReason =
@@ -219,7 +274,8 @@ export class WakeQueue {
 	}
 
 	pending(): WakeEvent[] {
-		return [...this.events.values()].filter((event) => !event.delivered)
+		return [...this.events.values()]
+			.filter((event) => !event.delivered)
 			.sort((a, b) => a.occurredAt - b.occurredAt || a.eventDigest.localeCompare(b.eventDigest))
 			.map((event) => ({ ...event }));
 	}
@@ -245,7 +301,8 @@ export class WakeQueue {
 		this.events.clear();
 		for (const stored of snapshot.events) {
 			const recomputed = digest(["wake", stored.reason, stored.subject, stored.detail, stored.occurredAt]);
-			if (stored.version !== 1 || recomputed !== stored.eventDigest) throw new Error("Wake event fails integrity re-derivation");
+			if (stored.version !== 1 || recomputed !== stored.eventDigest)
+				throw new Error("Wake event fails integrity re-derivation");
 			this.events.set(stored.eventDigest, { ...stored });
 		}
 	}

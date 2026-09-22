@@ -35,6 +35,19 @@ test("invocation validates pin membership, current grants and current schema", (
 		(error) => error instanceof SchemaDriftError);
 });
 
+test("F15 modified pin content cannot bypass reactivation after schema drift", () => {
+	const schemas = registry();
+	const pin = pinActivation({ skillId: "debug", skillRevision: "v3", branchIds: ["b1"], phase: "execute", tools: [tool], createdAt: 5 });
+	schemas.register("svc", "deploy", "sha-b", 10);
+	pin.tools[0].schemaDigest = "sha-b";
+	assert.throws(() => validateInvocation(pin, schemas, grants, tool), /pin|integrity/i);
+	const fresh = pinActivation({ ...pin, tools: [{ ...tool, schemaDigest: "sha-b" }] });
+	assert.equal(validateInvocation(fresh, schemas, grants, tool).schemaDigest, "sha-b");
+	assert.throws(() => validateInvocation(fresh, schemas, [], tool), /not authorized/);
+	fresh.phase = "other";
+	assert.throws(() => validateInvocation(fresh, schemas, grants, tool), /pin|integrity/i);
+});
+
 test("grant coverage is exact per service, tool, account and resource", () => {
 	assert.equal(grantCovers(grants, tool), true);
 	assert.equal(grantCovers(grants, { ...tool, resourceId: "res-2" }), false);

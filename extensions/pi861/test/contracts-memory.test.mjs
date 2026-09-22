@@ -83,6 +83,39 @@ test("assembly filters by readable scope and drops whole records at the byte bud
 	assert.throws(() => assembleNecessaryContext(items, { mode: "startup", maxBytes: 0, readDepth: 2, readableScopes: ["project:pi861"] }));
 });
 
+test("F11 source tombstones survive changed capture time, paraphrase and provenance reordering", () => {
+	const before = record({ provenance: [{ sourceKind: "user", ref: "chat#1", at: 1 }, { sourceKind: "tool", ref: "result#1", at: 2 }] });
+	const replay = record({ full: "paraphrased", provenance: [{ sourceKind: "tool", ref: "result#1", at: 20 }, { sourceKind: "user", ref: "chat#1", at: 30 }] });
+	assert.ok(memoryFingerprints(replay).some((item) => memoryFingerprints(before).includes(item)));
+	const subset = record({ full: "paraphrased", provenance: [{ sourceKind: "user", ref: "chat#1", at: 30 }] });
+	assert.ok(memoryFingerprints(subset).some((item) => memoryFingerprints(before).includes(item)));
+});
+
+test("F12 withdrawal follows transitive derivations even through withdrawn intermediates and cycles", () => {
+	const source = record({ status: "withdrawn" });
+	const middle = record({ id: "b", derivedFrom: [{ scope: "project:pi861", id: "mem-1", revision: 1 }] });
+	const leaf = record({ id: "c", derivedFrom: [{ scope: "project:pi861", id: "b", revision: 1 }] });
+	for (const status of ["confirmed", "withdrawn"]) {
+		const plan = planWithdrawal(source, [leaf, { ...middle, status }]);
+		assert.deepEqual(plan.invalidDerivatives.map((item) => item.id).sort(), status === "withdrawn" ? ["c"] : ["b", "c"]);
+	}
+	middle.derivedFrom.push({ scope: "project:pi861", id: "c", revision: 1 });
+	assert.equal(planWithdrawal(source, [leaf, middle]).invalidDerivatives.length, 2);
+});
+
+test("F13 necessary context preserves epistemic status, full provenance and derivation links", () => {
+	const candidate = record({ status: "candidate", provenance: [{ sourceKind: "inference", ref: "model#1", at: 1 }],
+		derivedFrom: [{ scope: "project:pi861", id: "source", revision: 2 }] });
+	for (const readDepth of [0, 1, 2]) {
+		const pack = assembleNecessaryContext([candidate], { mode: "startup", maxBytes: 5_000, readDepth, readableScopes: ["project:pi861"] });
+		const output = JSON.parse(pack.text);
+		assert.equal(output.status, "candidate");
+		assert.deepEqual(output.provenance, candidate.provenance);
+		assert.deepEqual(output.derivedFrom, candidate.derivedFrom);
+		assert.equal(pack.usedBytes, Buffer.byteLength(pack.text));
+	}
+});
+
 test("read depth selects abstract, overview or full per assembly", () => {
 	const items = [record({ id: "c1", purpose: "constraint" })];
 	const l0 = assembleNecessaryContext(items, { mode: "model-switch", maxBytes: 10_000, readDepth: 0, readableScopes: ["project:pi861"] });

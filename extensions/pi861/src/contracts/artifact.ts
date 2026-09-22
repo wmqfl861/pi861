@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { digest } from "./hash.ts";
 import type { ExecutionIdentity } from "./identity.ts";
 import { isValidScope, validateExecutionIdentity } from "./identity.ts";
 
@@ -53,33 +54,49 @@ export class ControlledArtifactStore {
 	private readonly limits: { maxArtifactBytes: number };
 
 	constructor(limits: { maxArtifactBytes: number } = { maxArtifactBytes: 32 * 1024 * 1024 }) {
-		if (!Number.isSafeInteger(limits.maxArtifactBytes) || limits.maxArtifactBytes < 1) throw new Error("Invalid artifact size limit");
+		if (!Number.isSafeInteger(limits.maxArtifactBytes) || limits.maxArtifactBytes < 1)
+			throw new Error("Invalid artifact size limit");
 		this.limits = limits;
 	}
 
-	put(content: Uint8Array | string, meta: { scope: string; producedBy: ExecutionIdentity; artifactId?: string; now: number }): ArtifactReference {
+	put(
+		content: Uint8Array | string,
+		meta: { scope: string; producedBy: ExecutionIdentity; artifactId?: string; now: number },
+	): ArtifactReference {
 		const bytes = typeof content === "string" ? new TextEncoder().encode(content) : content;
-		if (!bytes.length || bytes.byteLength > this.limits.maxArtifactBytes) throw new Error("Artifact content is empty or over the size limit");
+		if (!bytes.length || bytes.byteLength > this.limits.maxArtifactBytes)
+			throw new Error("Artifact content is empty or over the size limit");
 		if (!isValidScope(meta.scope) || !Number.isFinite(meta.now)) throw new Error("Invalid artifact metadata");
-		validateExecutionIdentity(meta.producedBy);
-		const artifactId = meta.artifactId ?? `art-${contentDigestOf(bytes).slice(0, 24)}`;
+		const producedBy = validateExecutionIdentity(meta.producedBy);
+		const contentDigest = contentDigestOf(bytes);
+		const artifactId =
+			meta.artifactId ?? `art-${digest(["artifact", contentDigest, meta.scope, producedBy, meta.now])}`;
 		const existing = this.artifacts.get(artifactId);
 		if (existing) {
-			if (existing.reference.contentDigest !== contentDigestOf(bytes)) throw new Error("Artifact ids are immutable");
-			return { ...existing.reference };
+			if (
+				existing.reference.contentDigest !== contentDigest ||
+				existing.reference.scope !== meta.scope ||
+				digest(existing.reference.producedBy) !== digest(producedBy)
+			)
+				throw new Error("Artifact ids and provenance are immutable");
+			return structuredClone(existing.reference);
 		}
 		if (this.revoked.has(artifactId)) throw new Error("Artifact id was revoked and cannot be rewritten");
 		const reference: ArtifactReference = {
-			artifactId, contentDigest: contentDigestOf(bytes), byteSize: bytes.byteLength,
-			scope: meta.scope, producedBy: structuredClone(meta.producedBy), producedAt: meta.now,
+			artifactId,
+			contentDigest,
+			byteSize: bytes.byteLength,
+			scope: meta.scope,
+			producedBy,
+			producedAt: meta.now,
 		};
 		this.artifacts.set(artifactId, { reference, content: new Uint8Array(bytes) });
-		return { ...reference };
+		return structuredClone(reference);
 	}
 
 	describe(artifactId: string, viewer: { readScopes: string[] }): ArtifactReference {
 		const entry = this.requireViewable(artifactId, viewer);
-		return { ...entry.reference };
+		return structuredClone(entry.reference);
 	}
 
 	window(artifactId: string, viewer: { readScopes: string[] }, offset: number, length: number): ArtifactWindow {
@@ -91,7 +108,10 @@ export class ControlledArtifactStore {
 		const end = Math.min(offset + length, entry.content.length);
 		const slice = entry.content.slice(start, end);
 		return {
-			artifactId, offset: start, length: slice.length, totalBytes: entry.content.length,
+			artifactId,
+			offset: start,
+			length: slice.length,
+			totalBytes: entry.content.length,
 			complete: start === 0 && end === entry.content.length,
 			content: slice,
 		};
@@ -103,7 +123,10 @@ export class ControlledArtifactStore {
 		this.artifacts.delete(artifactId);
 	}
 
-	private requireViewable(artifactId: string, viewer: { readScopes: string[] }): { reference: ArtifactReference; content: Uint8Array } {
+	private requireViewable(
+		artifactId: string,
+		viewer: { readScopes: string[] },
+	): { reference: ArtifactReference; content: Uint8Array } {
 		if (!artifactId || !viewer.readScopes?.length) throw new Error("Invalid artifact viewer");
 		const entry = this.artifacts.get(artifactId);
 		// Missing, revoked and out-of-scope all fail identically; existence must not leak.

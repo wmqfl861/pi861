@@ -110,6 +110,28 @@ test("subagent derivation inherits behavior and only narrows ceilings", () => {
 	assert.ok(child.resolutionPath.length > parent.resolutionPath.length);
 });
 
+test("F04 empty outbound overrides deny all while omitted overrides inherit", () => {
+	const config = registry();
+	config.put({ layer: "agent", ownerId: "blocked", revision: "v1", ceilings: { outbound: [] } });
+	config.put({ layer: "agent", ownerId: "inherited", revision: "v1", ceilings: { maxConcurrentAttempts: 1 } });
+	assert.deepEqual(config.resolve({ agentId: "blocked" }).ceilings.outbound, { rules: [], allowPrivateNetworks: false });
+	assert.deepEqual(config.resolve({ agentId: "inherited" }).ceilings.outbound, global.ceilings.outbound);
+	assert.deepEqual(deriveSubagentConfiguration(config.resolve({}), { outbound: [] }).ceilings.outbound.rules, []);
+});
+
+test("F05 configuration inputs, resolutions and descendants cannot mutate parent ceilings", () => {
+	const input = structuredClone(global);
+	const config = new ConfigurationRegistry(input);
+	input.ceilings.outbound.rules[0].hostPattern = "attacker.example.net";
+	const resolved = config.resolve({});
+	const child = deriveSubagentConfiguration(resolved, {});
+	child.ceilings.outbound.rules[0].protocols.length = 0;
+	assert.deepEqual(resolved.ceilings.outbound, global.ceilings.outbound);
+	resolved.ceilings.outbound.rules[0].hostPattern = "attacker.example.net";
+	resolved.ceilings.outbound.rules[0].protocols.length = 0;
+	assert.deepEqual(config.resolve({}).ceilings.outbound, global.ceilings.outbound);
+});
+
 test("invalid documents are rejected at write time", () => {
 	const config = registry();
 	assert.throws(() => config.put({ layer: "global", ownerId: "", revision: "x", behavior: {} }), /override layers/);

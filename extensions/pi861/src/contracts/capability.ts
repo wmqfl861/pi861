@@ -43,7 +43,8 @@ export class ToolSchemaRegistry {
 
 	register(serviceId: string, toolName: string, schemaDigest: string, now: number): SchemaRegistration {
 		this.validateKey(serviceId, toolName);
-		if (!schemaDigest || schemaDigest.length > 200 || !Number.isFinite(now)) throw new Error("Invalid schema registration");
+		if (!schemaDigest || schemaDigest.length > 200 || !Number.isFinite(now))
+			throw new Error("Invalid schema registration");
 		const key = `${serviceId}/${toolName}`;
 		const existing = this.current.get(key);
 		if (existing && existing.schemaDigest === schemaDigest) return { ...existing };
@@ -65,8 +66,15 @@ export class ToolSchemaRegistry {
 	}
 
 	private validateKey(serviceId: string, toolName: string): void {
-		if (!serviceId || serviceId.length > 200 || !toolName || toolName.length > 200 ||
-			serviceId.includes("/") || toolName.includes("/")) throw new Error("Invalid tool identity key");
+		if (
+			!serviceId ||
+			serviceId.length > 200 ||
+			!toolName ||
+			toolName.length > 200 ||
+			serviceId.includes("/") ||
+			toolName.includes("/")
+		)
+			throw new Error("Invalid tool identity key");
 	}
 }
 
@@ -82,10 +90,22 @@ export interface ActivationPin {
 
 /** Creates an immutable, content-addressed pin; the running task keeps this version until it ends. */
 export function pinActivation(input: Omit<ActivationPin, "pinDigest">): ActivationPin {
-	if (!input.skillId || input.skillId.length > 200 || !input.skillRevision || input.skillRevision.length > 200 ||
-		!input.phase || input.phase.length > 120 || !Number.isFinite(input.createdAt)) throw new Error("Invalid activation pin input");
-	if (!input.branchIds.length || new Set(input.branchIds).size !== input.branchIds.length ||
-		input.branchIds.some((branch) => !branch || branch.length > 200)) throw new Error("Activation pins need distinct branches");
+	if (
+		!input.skillId ||
+		input.skillId.length > 200 ||
+		!input.skillRevision ||
+		input.skillRevision.length > 200 ||
+		!input.phase ||
+		input.phase.length > 120 ||
+		!Number.isFinite(input.createdAt)
+	)
+		throw new Error("Invalid activation pin input");
+	if (
+		!input.branchIds.length ||
+		new Set(input.branchIds).size !== input.branchIds.length ||
+		input.branchIds.some((branch) => !branch || branch.length > 200)
+	)
+		throw new Error("Activation pins need distinct branches");
 	if (!input.tools.length) throw new Error("Activation pins need at least one tool binding");
 	for (const tool of input.tools) {
 		if (!tool.serviceId || !tool.toolName || !tool.accountId || !tool.resourceId || !tool.schemaDigest) {
@@ -100,8 +120,13 @@ export function pinActivation(input: Omit<ActivationPin, "pinDigest">): Activati
 }
 
 export function grantCovers(grants: readonly ToolGrant[], identity: FullToolIdentity): boolean {
-	return grants.some((grant) => grant.serviceId === identity.serviceId && grant.toolName === identity.toolName &&
-		grant.accountId === identity.accountId && grant.resourceIds.includes(identity.resourceId));
+	return grants.some(
+		(grant) =>
+			grant.serviceId === identity.serviceId &&
+			grant.toolName === identity.toolName &&
+			grant.accountId === identity.accountId &&
+			grant.resourceIds.includes(identity.resourceId),
+	);
 }
 
 /**
@@ -109,11 +134,23 @@ export function grantCovers(grants: readonly ToolGrant[], identity: FullToolIden
  * grants, and match the CURRENT schema. A changed schema raises SchemaDriftError; the caller
  * must re-derive a new activation pin instead of retrying the stale one.
  */
-export function validateInvocation(pin: ActivationPin, registry: ToolSchemaRegistry, grants: readonly ToolGrant[],
-	request: { serviceId: string; toolName: string; accountId: string; resourceId: string }): FullToolIdentity {
-	if (!request.serviceId || !request.toolName || !request.accountId || !request.resourceId) throw new Error("Invalid tool request");
-	const binding = pin.tools.find((tool) => tool.serviceId === request.serviceId && tool.toolName === request.toolName &&
-		tool.accountId === request.accountId && tool.resourceId === request.resourceId);
+export function validateInvocation(
+	pin: ActivationPin,
+	registry: ToolSchemaRegistry,
+	grants: readonly ToolGrant[],
+	request: { serviceId: string; toolName: string; accountId: string; resourceId: string },
+): FullToolIdentity {
+	if (pinActivation(pin).pinDigest !== pin.pinDigest)
+		throw new Error("Activation pin integrity changed; reactivate the skill");
+	if (!request.serviceId || !request.toolName || !request.accountId || !request.resourceId)
+		throw new Error("Invalid tool request");
+	const binding = pin.tools.find(
+		(tool) =>
+			tool.serviceId === request.serviceId &&
+			tool.toolName === request.toolName &&
+			tool.accountId === request.accountId &&
+			tool.resourceId === request.resourceId,
+	);
 	if (!binding) throw new Error("Tool call is not part of the pinned activation");
 	if (!grantCovers(grants, binding)) throw new Error("Tool call not authorized by current grants");
 	if (registry.drifted(binding)) throw new SchemaDriftError(binding.serviceId, binding.toolName);

@@ -68,6 +68,37 @@ test("execution identity paths round-trip and reject malformed parts", () => {
 	assert.throws(() => validateExecutionIdentity({ ...identity, attempt: 0 }));
 });
 
+test("F01/F02 revocation survives restart and reaches every descendant", () => {
+	const auth = authority();
+	const parent = auth.issue("parent", { roleIds: ["developer"], now: 1 });
+	const child = auth.deriveSubordinate(parent, "child", { restriction: {}, now: 2 });
+	const grandchild = auth.deriveSubordinate(child, "grandchild", { restriction: {}, now: 3 });
+	const unrelated = auth.issue("other", { roleIds: ["developer"], now: 4 });
+	auth.revoke("parent");
+	const restored = authority();
+	restored.restore(auth.exportState());
+	for (const issuer of [auth, restored]) {
+		for (const credential of [parent, child, grandchild]) assert.throws(() => issuer.verify(credential), /revoked/);
+		assert.deepEqual(issuer.verify(unrelated), unrelated);
+	}
+	const legacy = { ...auth.exportState(), version: 1 };
+	delete legacy.revokedPrincipalIds;
+	assert.throws(() => restored.restore(legacy), /Invalid authority snapshot/);
+	assert.throws(() => restored.verify(grandchild), /revoked/);
+});
+
+test("F14 execution paths escape separators without identity collisions", () => {
+	const base = { tenantId: "t", projectId: "p", goalId: "g", runId: "r", taskId: "task", attempt: 1 };
+	const first = { ...base, tenantId: "t/a" };
+	const second = { ...base, projectId: "a/p" };
+	assert.notEqual(executionPath(first), executionPath(second));
+	for (const field of ["tenantId", "projectId", "goalId", "runId", "taskId"]) {
+		const identity = { ...base, [field]: "a/../b" };
+		assert.deepEqual(parseExecutionPath(executionPath(identity)), identity);
+		assert.equal(executionPath(identity).split("/").length, 6);
+	}
+});
+
 test("authority snapshots restore with integrity checks and a fresh epoch", () => {
 	const auth = authority();
 	auth.issue("agent-1", { roleIds: ["developer"], now: 1_000 });

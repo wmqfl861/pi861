@@ -5,14 +5,7 @@
  * conservative booking; it is never silently written down as zero.
  */
 
-export type MeteredKind =
-	| "execution"
-	| "reception"
-	| "planning"
-	| "skill-compile"
-	| "distill"
-	| "probe"
-	| "auxiliary";
+export type MeteredKind = "execution" | "reception" | "planning" | "skill-compile" | "distill" | "probe" | "auxiliary";
 
 export interface UsageMeasure {
 	inputTokens: number;
@@ -59,17 +52,34 @@ export class BudgetExhausted extends Error {
 	}
 }
 
-const ZERO_USAGE: UsageMeasure = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0 };
+const ZERO_USAGE: UsageMeasure = {
+	inputTokens: 0,
+	outputTokens: 0,
+	cacheReadTokens: 0,
+	cacheWriteTokens: 0,
+	costUsd: 0,
+};
 
 function validateUsage(usage: UsageMeasure): void {
-	for (const value of [usage.inputTokens, usage.outputTokens, usage.cacheReadTokens, usage.cacheWriteTokens, usage.costUsd]) {
+	for (const value of [
+		usage.inputTokens,
+		usage.outputTokens,
+		usage.cacheReadTokens,
+		usage.cacheWriteTokens,
+		usage.costUsd,
+	]) {
 		if (!Number.isFinite(value) || value < 0) throw new Error("Usage measures must be finite and non-negative");
 	}
 }
 
 function isZero(usage: UsageMeasure): boolean {
-	return usage.inputTokens === 0 && usage.outputTokens === 0 && usage.cacheReadTokens === 0 &&
-		usage.cacheWriteTokens === 0 && usage.costUsd === 0;
+	return (
+		usage.inputTokens === 0 &&
+		usage.outputTokens === 0 &&
+		usage.cacheReadTokens === 0 &&
+		usage.cacheWriteTokens === 0 &&
+		usage.costUsd === 0
+	);
 }
 
 function addUsage(target: UsageMeasure, addition: UsageMeasure): void {
@@ -84,7 +94,8 @@ function validateLimits(limits: BudgetLimits): void {
 	for (const value of [limits.maxTotalCostUsd, limits.maxInputTokens, limits.maxOutputTokens]) {
 		if (!Number.isFinite(value) || value < 0) throw new Error("Budget limits must be finite and non-negative");
 	}
-	if (!Number.isSafeInteger(limits.maxAttempts) || limits.maxAttempts < 1) throw new Error("Attempt limit must be a positive integer");
+	if (!Number.isSafeInteger(limits.maxAttempts) || limits.maxAttempts < 1)
+		throw new Error("Attempt limit must be a positive integer");
 }
 
 interface TaskNode {
@@ -117,12 +128,17 @@ export class TaskTreeBudget {
 	}
 
 	registerTask(taskId: string, parentTaskId: string | null, subtreeLimits?: BudgetLimits): void {
-		if (!taskId || taskId.length > 200 || this.tasks.has(taskId)) throw new Error("Invalid or duplicate task registration");
+		if (!taskId || taskId.length > 200 || this.tasks.has(taskId))
+			throw new Error("Invalid or duplicate task registration");
 		if (parentTaskId !== null && !this.tasks.has(parentTaskId)) throw new Error("Unknown parent task");
 		if (subtreeLimits) validateLimits(subtreeLimits);
 		this.tasks.set(taskId, {
-			taskId, parentTaskId, limits: subtreeLimits ? { ...subtreeLimits } : undefined,
-			attempts: 0, usage: { ...ZERO_USAGE }, unknownSettlements: 0,
+			taskId,
+			parentTaskId,
+			limits: subtreeLimits ? { ...subtreeLimits } : undefined,
+			attempts: 0,
+			usage: { ...ZERO_USAGE },
+			unknownSettlements: 0,
 		});
 	}
 
@@ -160,15 +176,25 @@ export class TaskTreeBudget {
 		}
 		this.checkBounds("tree", this.rootLimits, this.rootAttempts, this.rootUsage, "root", estimate);
 		const reservation: UsageReservation = {
-			reservationId: `r-${++this.reservationSequence}`, taskId, kind,
-			estimate: { ...estimate }, openedAt: now, state: "reserved",
+			reservationId: `r-${++this.reservationSequence}`,
+			taskId,
+			kind,
+			estimate: { ...estimate },
+			openedAt: now,
+			state: "reserved",
 		};
 		this.reservations.set(reservation.reservationId, reservation);
-		return { ...reservation };
+		return structuredClone(reservation);
 	}
 
-	private checkBounds(scope: string, limits: BudgetLimits, committedAttempts: number, committedUsage: UsageMeasure,
-		scopeId: string | "root", estimate: UsageMeasure): void {
+	private checkBounds(
+		scope: string,
+		limits: BudgetLimits,
+		committedAttempts: number,
+		committedUsage: UsageMeasure,
+		scopeId: string | "root",
+		estimate: UsageMeasure,
+	): void {
 		const held: UsageMeasure = { ...ZERO_USAGE };
 		let openAttempts = 0;
 		for (const reservation of this.reservations.values()) {
@@ -176,12 +202,22 @@ export class TaskTreeBudget {
 			addUsage(held, reservation.estimate);
 			openAttempts++;
 		}
-		const projectedInput = committedUsage.inputTokens + committedUsage.cacheReadTokens + held.inputTokens + held.cacheReadTokens + estimate.inputTokens + estimate.cacheReadTokens;
+		const projectedInput =
+			committedUsage.inputTokens +
+			committedUsage.cacheReadTokens +
+			held.inputTokens +
+			held.cacheReadTokens +
+			estimate.inputTokens +
+			estimate.cacheReadTokens;
 		const projectedOutput = committedUsage.outputTokens + held.outputTokens + estimate.outputTokens;
 		const projectedCost = committedUsage.costUsd + held.costUsd + estimate.costUsd;
 		const projectedAttempts = committedAttempts + openAttempts + 1;
-		if (projectedInput > limits.maxInputTokens || projectedOutput > limits.maxOutputTokens ||
-			projectedCost > limits.maxTotalCostUsd || projectedAttempts > limits.maxAttempts) {
+		if (
+			projectedInput > limits.maxInputTokens ||
+			projectedOutput > limits.maxOutputTokens ||
+			projectedCost > limits.maxTotalCostUsd ||
+			projectedAttempts > limits.maxAttempts
+		) {
 			throw new BudgetExhausted(scope, limits, estimate);
 		}
 	}
@@ -233,14 +269,19 @@ export class TaskTreeBudget {
 		const node = this.tasks.get(taskId);
 		if (!node) throw new Error(`Unknown task: ${taskId}`);
 		return {
-			taskId, parentTaskId: node.parentTaskId,
+			taskId,
+			parentTaskId: node.parentTaskId,
 			limits: node.limits ? { ...node.limits } : undefined,
-			attempts: node.attempts, usage: { ...node.usage }, unknownSettlements: node.unknownSettlements,
+			attempts: node.attempts,
+			usage: { ...node.usage },
+			unknownSettlements: node.unknownSettlements,
 		};
 	}
 
 	openReservations(): UsageReservation[] {
-		return [...this.reservations.values()].filter((reservation) => reservation.state === "reserved").map((reservation) => ({ ...reservation }));
+		return [...this.reservations.values()]
+			.filter((reservation) => reservation.state === "reserved")
+			.map((reservation) => structuredClone(reservation));
 	}
 
 	exportState(): {
@@ -253,50 +294,97 @@ export class TaskTreeBudget {
 		reservations: UsageReservation[];
 	} {
 		return {
-			version: 1, rootLimits: { ...this.rootLimits }, rootAttempts: this.rootAttempts,
-			rootUsage: { ...this.rootUsage }, rootUnknown: this.rootUnknown,
+			version: 1,
+			rootLimits: { ...this.rootLimits },
+			rootAttempts: this.rootAttempts,
+			rootUsage: { ...this.rootUsage },
+			rootUnknown: this.rootUnknown,
 			tasks: [...this.tasks.keys()].map((taskId) => this.taskSummary(taskId)),
-			reservations: [...this.reservations.values()].map((reservation) => ({ ...reservation })),
+			reservations: [...this.reservations.values()].map((reservation) => structuredClone(reservation)),
 		};
 	}
 
 	restore(snapshot: ReturnType<TaskTreeBudget["exportState"]>): void {
-		if (snapshot.version !== 1 || !Number.isSafeInteger(snapshot.rootAttempts) || snapshot.rootAttempts < 0 ||
-			!Array.isArray(snapshot.tasks) || !Array.isArray(snapshot.reservations)) throw new Error("Invalid budget snapshot");
+		if (
+			snapshot.version !== 1 ||
+			!Number.isSafeInteger(snapshot.rootAttempts) ||
+			snapshot.rootAttempts < 0 ||
+			!Array.isArray(snapshot.tasks) ||
+			!Array.isArray(snapshot.reservations)
+		)
+			throw new Error("Invalid budget snapshot");
 		validateLimits(snapshot.rootLimits);
 		validateUsage(snapshot.rootUsage);
 		const seen = new Set<string>();
 		for (const task of snapshot.tasks) {
-			if (!task.taskId || seen.has(task.taskId) || !Number.isSafeInteger(task.attempts) || task.attempts < 0 ||
-				!Number.isSafeInteger(task.unknownSettlements) || task.unknownSettlements < 0 ||
-				(task.parentTaskId !== null && !snapshot.tasks.some((other) => other.taskId === task.parentTaskId))) {
+			if (
+				!task.taskId ||
+				seen.has(task.taskId) ||
+				!Number.isSafeInteger(task.attempts) ||
+				task.attempts < 0 ||
+				!Number.isSafeInteger(task.unknownSettlements) ||
+				task.unknownSettlements < 0 ||
+				(task.parentTaskId !== null && !snapshot.tasks.some((other) => other.taskId === task.parentTaskId))
+			) {
 				throw new Error("Invalid task usage snapshot");
 			}
 			validateUsage(task.usage);
 			if (task.limits) validateLimits(task.limits);
 			seen.add(task.taskId);
 		}
+		const reservations = new Map<string, UsageReservation>();
+		let sequence = 0;
+		for (const reservation of snapshot.reservations) {
+			const match = /^r-([1-9][0-9]*)$/.exec(reservation.reservationId);
+			const number = Number(match?.[1]);
+			if (
+				!Number.isSafeInteger(number) ||
+				reservations.has(reservation.reservationId) ||
+				!Number.isFinite(reservation.openedAt) ||
+				!["reserved", "settled", "settled-unknown", "released"].includes(reservation.state) ||
+				!["execution", "reception", "planning", "skill-compile", "distill", "probe", "auxiliary"].includes(
+					reservation.kind,
+				) ||
+				(reservation.taskId !== null && !seen.has(reservation.taskId))
+			)
+				throw new Error("Invalid reservation snapshot");
+			validateUsage(reservation.estimate);
+			reservations.set(reservation.reservationId, structuredClone(reservation));
+			sequence = Math.max(sequence, number);
+		}
+		for (const task of snapshot.tasks) {
+			const ancestors = new Set<string>([task.taskId]);
+			let parent = task.parentTaskId;
+			while (parent !== null) {
+				if (ancestors.has(parent)) throw new Error("Invalid cyclic task usage snapshot");
+				ancestors.add(parent);
+				parent = snapshot.tasks.find((node) => node.taskId === parent)?.parentTaskId ?? null;
+			}
+		}
+		if (
+			!Number.isSafeInteger(snapshot.rootUnknown) ||
+			snapshot.rootUnknown < 0 ||
+			snapshot.rootUnknown > snapshot.rootAttempts
+		) {
+			throw new Error("Invalid unknown usage snapshot");
+		}
 		this.tasks.clear();
 		this.reservations.clear();
 		for (const task of snapshot.tasks) {
 			this.tasks.set(task.taskId, {
-				taskId: task.taskId, parentTaskId: task.parentTaskId,
+				taskId: task.taskId,
+				parentTaskId: task.parentTaskId,
 				limits: task.limits ? { ...task.limits } : undefined,
-				attempts: task.attempts, usage: { ...task.usage }, unknownSettlements: task.unknownSettlements,
+				attempts: task.attempts,
+				usage: { ...task.usage },
+				unknownSettlements: task.unknownSettlements,
 			});
 		}
 		Object.assign(this.rootLimits, snapshot.rootLimits);
 		Object.assign(this.rootUsage, snapshot.rootUsage);
 		this.rootAttempts = snapshot.rootAttempts;
 		this.rootUnknown = snapshot.rootUnknown;
-		for (const reservation of snapshot.reservations) {
-			if (this.reservations.has(reservation.reservationId) ||
-				!["reserved", "settled", "settled-unknown", "released"].includes(reservation.state) ||
-				(reservation.taskId !== null && !this.tasks.has(reservation.taskId))) {
-				throw new Error("Invalid reservation snapshot");
-			}
-			validateUsage(reservation.estimate);
-			this.reservations.set(reservation.reservationId, { ...reservation });
-		}
+		for (const [id, reservation] of reservations) this.reservations.set(id, reservation);
+		this.reservationSequence = sequence;
 	}
 }

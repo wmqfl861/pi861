@@ -1,13 +1,9 @@
 import { digest } from "./hash.ts";
 
 /**
- * C4 storage contract: requestId idempotency, expected-version compare-and-set, transaction
- * receipts with an explicit commit-unknown state, a transactional outbox, and pagination /
- * incremental cursors. The transaction body must be a pure synchronous function: awaiting
- * external systems (model calls, HTTP, subprocesses) while holding a storage lock violates the
- * contract; external work belongs after the commit, driven by the outbox.
+ * C4 storage: synchronous transactions commit state, request receipts and outbox together.
+ * External work runs after commit. Persistence and recovery are trusted host boundaries.
  */
-
 export type CommitState = "committed" | "unknown";
 
 export interface TransactionReceipt {
@@ -30,18 +26,15 @@ export class VersionConflict extends Error {
 	}
 }
 
-/**
- * Idempotent receipt log. A replayed requestId with identical content returns the original
- * receipt without re-executing anything; the same requestId with different content is a
- * conflict. "unknown" receipts are provisional outcomes of interrupted commits and are resolved
- * exactly once through resolveUnknown().
- */
+/** Idempotent receipts; an unknown outcome can only be resolved by trusted reconciliation. */
 export class ReceiptLog {
 	private readonly receipts = new Map<string, TransactionReceipt>();
 	private readonly notCommitted = new Set<string>();
 
 	record(requestId: string, contentDigest: string, version: number, now: number): TransactionReceipt {
 		this.requireShape(requestId, contentDigest);
+		if (!Number.isSafeInteger(version) || version < 0 || !Number.isFinite(now))
+			throw new Error("Invalid receipt version or time");
 		const existing = this.receipts.get(requestId);
 		if (existing) {
 			if (existing.contentDigest !== contentDigest) throw new IdempotencyConflict(requestId);
@@ -50,7 +43,7 @@ export class ReceiptLog {
 			this.receipts.set(requestId, resolved);
 			return { ...resolved };
 		}
-		if (this.notCommitted.has(requestId)) this.notCommitted.delete(requestId);
+		this.notCommitted.delete(requestId);
 		const receipt: TransactionReceipt = { requestId, state: "committed", version, contentDigest, committedAt: now };
 		this.receipts.set(requestId, receipt);
 		return { ...receipt };
@@ -58,30 +51,43 @@ export class ReceiptLog {
 
 	markUnknown(requestId: string, contentDigest: string, attemptedVersion: number): TransactionReceipt {
 		this.requireShape(requestId, contentDigest);
+		if (!Number.isSafeInteger(attemptedVersion) || attemptedVersion < 0) throw new Error("Invalid attempted version");
 		const existing = this.receipts.get(requestId);
 		if (existing) {
 			if (existing.contentDigest !== contentDigest) throw new IdempotencyConflict(requestId);
 			return { ...existing };
 		}
 		const receipt: TransactionReceipt = { requestId, state: "unknown", version: attemptedVersion, contentDigest };
+		this.notCommitted.delete(requestId);
 		this.receipts.set(requestId, receipt);
 		return { ...receipt };
 	}
 
-	/** Trusted recovery path: decides the truth about an interrupted commit, exactly once. */
-	resolveUnknown(requestId: string, outcome: { committed: { version: number; contentDigest: string; at: number } } | { notCommitted: true }, now: number): void {
+	resolveUnknown(
+		requestId: string,
+		outcome: { committed: { version: number; contentDigest: string; at: number } } | { notCommitted: true },
+		now: number,
+	): void {
+		if (!Number.isFinite(now)) throw new Error("Invalid resolution time");
 		const existing = this.receipts.get(requestId);
 		if (!existing || existing.state !== "unknown") throw new Error(`No unknown receipt to resolve: ${requestId}`);
 		if ("committed" in outcome) {
 			if (outcome.committed.contentDigest !== existing.contentDigest) throw new IdempotencyConflict(requestId);
+			if (
+				!Number.isSafeInteger(outcome.committed.version) ||
+				outcome.committed.version < 0 ||
+				!Number.isFinite(outcome.committed.at)
+			) {
+				throw new Error("Invalid committed resolution");
+			}
 			existing.state = "committed";
 			existing.version = outcome.committed.version;
 			existing.committedAt = outcome.committed.at;
 		} else {
+			if (outcome.notCommitted !== true) throw new Error("Invalid not-committed resolution");
 			this.receipts.delete(requestId);
 			this.notCommitted.add(requestId);
 		}
-		if (!Number.isFinite(now)) throw new Error("Invalid resolution time");
 	}
 
 	lookup(requestId: string): TransactionReceipt | undefined {
@@ -90,26 +96,40 @@ export class ReceiptLog {
 	}
 
 	exportState(): { receipts: TransactionReceipt[]; notCommitted: string[] } {
-		return { receipts: [...this.receipts.values()].map((receipt) => ({ ...receipt })), notCommitted: [...this.notCommitted] };
+		return {
+			receipts: [...this.receipts.values()].map((receipt) => ({ ...receipt })),
+			notCommitted: [...this.notCommitted],
+		};
 	}
 
-	restore(snapshot: { receipts: TransactionReceipt[]; notCommitted: string[] }): void {
-		if (!Array.isArray(snapshot.receipts) || !Array.isArray(snapshot.notCommitted)) throw new Error("Invalid receipt log snapshot");
+	restore(snapshot: ReturnType<ReceiptLog["exportState"]>): void {
+		if (!snapshot || !Array.isArray(snapshot.receipts) || !Array.isArray(snapshot.notCommitted))
+			throw new Error("Invalid receipt log snapshot");
 		const restored = new Map<string, TransactionReceipt>();
 		for (const receipt of snapshot.receipts) {
-			if (!receipt.requestId || !receipt.contentDigest || restored.has(receipt.requestId) ||
-				!Number.isSafeInteger(receipt.version) || receipt.version < 0 ||
+			if (
+				!receipt.requestId ||
+				!receipt.contentDigest ||
+				restored.has(receipt.requestId) ||
+				!Number.isSafeInteger(receipt.version) ||
+				receipt.version < 0 ||
 				!["committed", "unknown"].includes(receipt.state) ||
-				(receipt.committedAt !== undefined && !Number.isFinite(receipt.committedAt))) throw new Error("Invalid receipt snapshot");
+				(receipt.state === "committed" && !Number.isFinite(receipt.committedAt)) ||
+				(receipt.committedAt !== undefined && !Number.isFinite(receipt.committedAt))
+			)
+				throw new Error("Invalid receipt snapshot");
 			restored.set(receipt.requestId, { ...receipt });
+		}
+		const notCommitted = new Set<string>();
+		for (const requestId of snapshot.notCommitted) {
+			if (typeof requestId !== "string" || !requestId || notCommitted.has(requestId) || restored.has(requestId))
+				throw new Error("Invalid not-committed snapshot");
+			notCommitted.add(requestId);
 		}
 		this.receipts.clear();
 		for (const [requestId, receipt] of restored) this.receipts.set(requestId, receipt);
 		this.notCommitted.clear();
-		for (const requestId of snapshot.notCommitted) {
-			if (!requestId || this.notCommitted.has(requestId)) throw new Error("Invalid not-committed snapshot");
-			this.notCommitted.add(requestId);
-		}
+		for (const requestId of notCommitted) this.notCommitted.add(requestId);
 	}
 
 	private requireShape(requestId: string, contentDigest: string): void {
@@ -120,6 +140,8 @@ export class ReceiptLog {
 export interface OutboxEntry {
 	entryId: string;
 	eventDigest: string;
+	/** Plain JSON payload retained for delivery after a process restart. */
+	event: unknown;
 	createdAt: number;
 	attempts: number;
 	nextAttemptAt: number;
@@ -129,45 +151,47 @@ export interface OutboxEntry {
 
 export type OutboxOutcome = "dispatched" | "failed-terminal" | { retryAfterMs: number; error: string };
 
-/**
- * Transactional outbox. Entries are appended in the same transaction as the state change and
- * dispatched afterwards, outside any storage lock. Delivery is at-least-once; consumers must
- * deduplicate on eventDigest.
- */
+/** At-least-once delivery after the storage lock; consumers deduplicate on eventDigest. */
 export class Outbox {
 	private readonly entries = new Map<string, OutboxEntry>();
 	private readonly retryOptions: { baseRetryMs: number; maxRetryMs: number };
 	private sequence = 0;
 
 	constructor(options: { baseRetryMs?: number; maxRetryMs?: number } = {}) {
-		if (options.baseRetryMs !== undefined && (!Number.isSafeInteger(options.baseRetryMs) || options.baseRetryMs < 1)) {
+		if (options.baseRetryMs !== undefined && (!Number.isSafeInteger(options.baseRetryMs) || options.baseRetryMs < 1))
 			throw new Error("Invalid outbox retry options");
-		}
-		if (options.maxRetryMs !== undefined && (!Number.isSafeInteger(options.maxRetryMs) || options.maxRetryMs < 1)) {
+		if (options.maxRetryMs !== undefined && (!Number.isSafeInteger(options.maxRetryMs) || options.maxRetryMs < 1))
 			throw new Error("Invalid outbox retry options");
-		}
 		this.retryOptions = { baseRetryMs: options.baseRetryMs ?? 1000, maxRetryMs: options.maxRetryMs ?? 60_000 };
 	}
 
 	append(event: unknown, now: number): OutboxEntry {
 		if (!Number.isFinite(now)) throw new Error("Invalid outbox timestamp");
 		const eventDigest = digest(["outbox", event]);
+		const payload = structuredClone(event);
 		const existing = [...this.entries.values()].find((entry) => entry.eventDigest === eventDigest);
-		if (existing) return { ...existing };
+		if (existing) return structuredClone(existing);
 		const entry: OutboxEntry = {
-			entryId: `o-${++this.sequence}`, eventDigest, createdAt: now,
-			attempts: 0, nextAttemptAt: now, state: "pending",
+			entryId: `o-${++this.sequence}`,
+			eventDigest,
+			event: payload,
+			createdAt: now,
+			attempts: 0,
+			nextAttemptAt: now,
+			state: "pending",
 		};
 		this.entries.set(entry.entryId, entry);
-		return { ...entry };
+		return structuredClone(entry);
 	}
 
-	/** Read-only claim; completion is reported separately so dispatch happens without a lock. */
+	/** Read-only claim; completion is separate so dispatch happens outside the transaction. */
 	claim(now: number, limit: number): OutboxEntry[] {
 		if (!Number.isFinite(now) || !Number.isSafeInteger(limit) || limit < 1) throw new Error("Invalid outbox claim");
-		return [...this.entries.values()].filter((entry) => entry.state === "pending" && entry.nextAttemptAt <= now)
+		return [...this.entries.values()]
+			.filter((entry) => entry.state === "pending" && entry.nextAttemptAt <= now)
 			.sort((a, b) => a.createdAt - b.createdAt || a.entryId.localeCompare(b.entryId))
-			.slice(0, limit).map((entry) => ({ ...entry }));
+			.slice(0, limit)
+			.map((entry) => structuredClone(entry));
 	}
 
 	complete(entryId: string, outcome: OutboxOutcome, now: number): void {
@@ -182,9 +206,10 @@ export class Outbox {
 			entry.state = "failed";
 			return;
 		}
-		const base = this.retryOptions.baseRetryMs;
-		const max = this.retryOptions.maxRetryMs;
-		const delay = Math.min(max, base * 2 ** Math.min(entry.attempts, 16));
+		const delay = Math.min(
+			this.retryOptions.maxRetryMs,
+			this.retryOptions.baseRetryMs * 2 ** Math.min(entry.attempts, 16),
+		);
 		entry.nextAttemptAt = now + Math.min(delay, Math.max(1, outcome.retryAfterMs));
 		entry.lastError = outcome.error.slice(0, 500);
 	}
@@ -193,21 +218,42 @@ export class Outbox {
 		return [...this.entries.values()].filter((entry) => entry.state === "pending").length;
 	}
 
-	exportState(): { version: 1; sequence: number; entries: OutboxEntry[] } {
-		return { version: 1, sequence: this.sequence, entries: [...this.entries.values()].map((entry) => ({ ...entry })) };
+	exportState(): { version: 2; sequence: number; entries: OutboxEntry[] } {
+		return {
+			version: 2,
+			sequence: this.sequence,
+			entries: [...this.entries.values()].map((entry) => structuredClone(entry)),
+		};
 	}
 
-	restore(snapshot: { version: 1; sequence: number; entries: OutboxEntry[] }): void {
-		if (snapshot.version !== 1 || !Number.isSafeInteger(snapshot.sequence) || snapshot.sequence < 0 ||
-			!Array.isArray(snapshot.entries)) throw new Error("Invalid outbox snapshot");
-		this.entries.clear();
+	restore(snapshot: ReturnType<Outbox["exportState"]>): void {
+		if (
+			!snapshot ||
+			snapshot.version !== 2 ||
+			!Number.isSafeInteger(snapshot.sequence) ||
+			snapshot.sequence < 0 ||
+			!Array.isArray(snapshot.entries)
+		)
+			throw new Error("Invalid outbox snapshot");
+		const restored = new Map<string, OutboxEntry>();
 		for (const entry of snapshot.entries) {
-			if (this.entries.has(entry.entryId) || !entry.eventDigest ||
-				!Number.isSafeInteger(entry.attempts) || entry.attempts < 0 ||
-				!Number.isFinite(entry.nextAttemptAt) || !Number.isFinite(entry.createdAt) ||
-				!["pending", "dispatched", "failed"].includes(entry.state)) throw new Error("Invalid outbox entry snapshot");
-			this.entries.set(entry.entryId, { ...entry });
+			const sequence = Number(/^o-([1-9][0-9]*)$/.exec(entry.entryId)?.[1]);
+			if (
+				restored.has(entry.entryId) ||
+				!Number.isSafeInteger(sequence) ||
+				sequence > snapshot.sequence ||
+				entry.eventDigest !== digest(["outbox", entry.event]) ||
+				!Number.isSafeInteger(entry.attempts) ||
+				entry.attempts < 0 ||
+				!Number.isFinite(entry.nextAttemptAt) ||
+				!Number.isFinite(entry.createdAt) ||
+				!["pending", "dispatched", "failed"].includes(entry.state)
+			)
+				throw new Error("Invalid outbox entry snapshot");
+			restored.set(entry.entryId, structuredClone(entry));
 		}
+		this.entries.clear();
+		for (const [id, entry] of restored) this.entries.set(id, entry);
 		this.sequence = snapshot.sequence;
 	}
 }
@@ -238,57 +284,108 @@ export function paginate<T>(items: readonly T[], cursor: string | null | undefin
 	if (offset > items.length) throw new Error("Page cursor beyond the end of the result set");
 	const slice = items.slice(offset, offset + limit);
 	const nextOffset = offset + slice.length;
-	return { items: structuredClone(slice), nextCursor: nextOffset < items.length ? encodeCursor(nextOffset) : null, hasMore: nextOffset < items.length };
+	return {
+		items: structuredClone(slice),
+		nextCursor: nextOffset < items.length ? encodeCursor(nextOffset) : null,
+		hasMore: nextOffset < items.length,
+	};
 }
 
-export function encodeIncrementalCursor(sinceVersion: number): string {
-	if (!Number.isSafeInteger(sinceVersion) || sinceVersion < 0) throw new Error("Incremental cursors are non-negative integers");
-	return `d:${sinceVersion}`;
+export interface IncrementalPosition {
+	version: number;
+	id: string;
 }
 
-export function decodeIncrementalCursor(cursor: string): number {
-	const match = /^d:([0-9]+)$/.exec(cursor);
-	if (!match?.[1]) throw new Error(`Malformed incremental cursor: ${cursor}`);
-	const value = Number(match[1]);
-	if (!Number.isSafeInteger(value) || value < 0) throw new Error(`Malformed incremental cursor: ${cursor}`);
-	return value;
+export function encodeIncrementalCursor(position: IncrementalPosition): string {
+	if (
+		!Number.isSafeInteger(position.version) ||
+		position.version < 0 ||
+		typeof position.id !== "string" ||
+		!position.id
+	)
+		throw new Error("Invalid incremental position");
+	return `d2:${position.version}:${encodeURIComponent(position.id)}`;
 }
 
-/** Version-ordered incremental window: strictly newer than sinceVersion, ascending, bounded. */
-export function incrementalWindow<T extends { version: number }>(items: readonly T[], sinceVersion: number, limit: number): { items: T[]; nextCursor: string | null } {
-	if (!Number.isSafeInteger(sinceVersion) || sinceVersion < 0 || !Number.isSafeInteger(limit) || limit < 1) {
+export function decodeIncrementalCursor(cursor: string): IncrementalPosition {
+	const match = /^d2:([0-9]+):(.+)$/.exec(cursor);
+	if (!match?.[1] || !match[2]) throw new Error(`Malformed incremental cursor: ${cursor}`);
+	const position = { version: Number(match[1]), id: decodeURIComponent(match[2]) };
+	if (encodeIncrementalCursor(position) !== cursor) throw new Error(`Malformed incremental cursor: ${cursor}`);
+	return position;
+}
+
+/** Numeric starting versions exclude that entire version; page positions resume after (version,id). */
+export function incrementalWindow<T extends IncrementalPosition>(
+	items: readonly T[],
+	since: number | IncrementalPosition,
+	limit: number,
+): { items: T[]; nextCursor: string | null } {
+	const version = typeof since === "number" ? since : since.version;
+	if (!Number.isSafeInteger(version) || version < 0 || !Number.isSafeInteger(limit) || limit < 1)
 		throw new Error("Invalid incremental window");
+	if (typeof since !== "number") encodeIncrementalCursor(since);
+	const seen = new Set<string>();
+	for (const item of items) {
+		const key = encodeIncrementalCursor(item);
+		if (seen.has(key)) throw new Error("Duplicate incremental position");
+		seen.add(key);
 	}
-	const fresh = items.filter((item) => item.version > sinceVersion).sort((a, b) => a.version - b.version).slice(0, limit);
-	const last = fresh[fresh.length - 1];
-	return { items: structuredClone(fresh), nextCursor: fresh.length === limit && last ? encodeIncrementalCursor(last.version) : null };
+	const fresh = items
+		.filter(
+			(item) =>
+				item.version > version || (typeof since !== "number" && item.version === version && item.id > since.id),
+		)
+		.sort((a, b) => a.version - b.version || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+	const page = fresh.slice(0, limit);
+	const last = page[page.length - 1];
+	return {
+		items: structuredClone(page),
+		nextCursor: fresh.length > limit && last ? encodeIncrementalCursor(last) : null,
+	};
 }
 
 export interface TransactionPlan<S> {
 	requestId: string;
-	/** Digest over the intended write payload; an identical retry must present the identical digest. */
+	/** Digest over the intended write; identical retries must present the identical digest. */
 	contentDigest: string;
 	expectedVersion: number | null;
-	/** Pure and synchronous. Performing I/O or external calls here violates the storage-lock contract. */
+	/** Pure and synchronous; no external calls or I/O inside the storage lock. */
 	mutate: (state: S) => S;
 	outboxEvents?: unknown[];
 }
 
+export interface StoreSnapshot<S> {
+	version: 2;
+	storeVersion: number;
+	state: S;
+	receipts: ReturnType<ReceiptLog["exportState"]>;
+	outbox: ReturnType<Outbox["exportState"]>;
+}
+
 /**
- * Single-writer transactional store with version CAS, idempotent replay and an atomic outbox
- * append. persist() must commit durably before returning; the receipt is recorded and the
- * in-memory state swapped only after persist succeeds, so a failed persist leaves no trace that
- * could later masquerade as a committed receipt.
+ * persist must commit the full fourth-argument snapshot atomically and synchronously.
+ * It sees the candidate outbox via outboxQueue; a thrown persist leaves the prior state intact.
+ * An uncertain external commit must be marked unknown and reconciled before further writes.
  */
 export class TransactionalStore<S> {
 	private state: S;
 	private version = 0;
-	private readonly persist: (state: S, version: number, receipt: TransactionReceipt) => void;
+	private readonly persist: (
+		state: S,
+		version: number,
+		receipt: TransactionReceipt,
+		snapshot: StoreSnapshot<S>,
+	) => void;
 	private readonly receipts = new ReceiptLog();
 	private readonly outbox = new Outbox();
+	private pendingOutbox: Outbox | undefined;
+	private busy = false;
 
-	constructor(initial: S, persist:
-		(state: S, version: number, receipt: TransactionReceipt) => void = () => {}) {
+	constructor(
+		initial: S,
+		persist: (state: S, version: number, receipt: TransactionReceipt, snapshot: StoreSnapshot<S>) => void = () => {},
+	) {
 		this.state = structuredClone(initial);
 		this.persist = persist;
 	}
@@ -297,56 +394,132 @@ export class TransactionalStore<S> {
 		return { version: this.version, state: structuredClone(this.state) };
 	}
 
-	get outboxQueue(): Outbox { return this.outbox; }
-
-	transact(plan: TransactionPlan<S>): { receipt: TransactionReceipt; version: number; state: S } {
-		if (!plan.requestId || plan.requestId.length > 200 || !plan.contentDigest) throw new Error("Invalid transaction request");
-		const replayed = this.receipts.lookup(plan.requestId);
-		if (replayed?.state === "committed") {
-			if (replayed.contentDigest !== plan.contentDigest) throw new IdempotencyConflict(plan.requestId);
-			return { receipt: { ...replayed }, version: this.version, state: structuredClone(this.state) };
-		}
-		if (replayed?.state === "unknown") {
-			throw new Error(`Transaction has an unresolved unknown commit; resolve it first: ${plan.requestId}`);
-		}
-		if (plan.expectedVersion !== null && plan.expectedVersion !== this.version) {
-			throw new VersionConflict(plan.expectedVersion, this.version);
-		}
-		const candidate = plan.mutate(structuredClone(this.state));
-		const nextVersion = this.version + 1;
-		const receipt: TransactionReceipt = { requestId: plan.requestId, state: "committed", version: nextVersion,
-			contentDigest: plan.contentDigest, committedAt: nextVersion };
-		this.persist(candidate, nextVersion, receipt);
-		this.receipts.record(plan.requestId, plan.contentDigest, nextVersion, nextVersion);
-		for (const event of plan.outboxEvents ?? []) this.outbox.append(event, nextVersion);
-		this.state = candidate;
-		this.version = nextVersion;
-		return { receipt: { ...receipt }, version: nextVersion, state: structuredClone(this.state) };
+	get outboxQueue(): Outbox {
+		return this.pendingOutbox ?? this.outbox;
 	}
 
-	/** Marks a commit whose durable outcome is unknown (crash between write and acknowledgement). */
+	transact(plan: TransactionPlan<S>): { receipt: TransactionReceipt; version: number; state: S } {
+		if (this.busy) throw new Error("Reentrant transaction is not allowed");
+		if (!plan.requestId || plan.requestId.length > 200 || !plan.contentDigest)
+			throw new Error("Invalid transaction request");
+		const replayed = this.receipts.lookup(plan.requestId);
+		if (replayed && replayed.contentDigest !== plan.contentDigest) throw new IdempotencyConflict(plan.requestId);
+		if (replayed?.state === "committed") return { receipt: replayed, ...this.current };
+		if (this.receipts.exportState().receipts.some((receipt) => receipt.state === "unknown")) {
+			throw new Error(`Transaction has an unresolved unknown commit; resolve it first: ${plan.requestId}`);
+		}
+		if (plan.expectedVersion !== null && plan.expectedVersion !== this.version)
+			throw new VersionConflict(plan.expectedVersion, this.version);
+		this.busy = true;
+		try {
+			const candidate = structuredClone(plan.mutate(structuredClone(this.state)));
+			const nextVersion = this.version + 1;
+			const nextReceipts = new ReceiptLog();
+			nextReceipts.restore(this.receipts.exportState());
+			const receipt = nextReceipts.record(plan.requestId, plan.contentDigest, nextVersion, nextVersion);
+			const nextOutbox = new Outbox();
+			nextOutbox.restore(this.outbox.exportState());
+			for (const event of plan.outboxEvents ?? []) nextOutbox.append(event, nextVersion);
+			const snapshot: StoreSnapshot<S> = {
+				version: 2,
+				storeVersion: nextVersion,
+				state: candidate,
+				receipts: nextReceipts.exportState(),
+				outbox: nextOutbox.exportState(),
+			};
+			this.pendingOutbox = new Outbox();
+			this.pendingOutbox.restore(snapshot.outbox);
+			this.persist(structuredClone(candidate), nextVersion, { ...receipt }, structuredClone(snapshot));
+			this.receipts.restore(snapshot.receipts);
+			this.outbox.restore(snapshot.outbox);
+			this.state = candidate;
+			this.version = nextVersion;
+			return { receipt, ...this.current };
+		} finally {
+			this.pendingOutbox = undefined;
+			this.busy = false;
+		}
+	}
+
 	markUnknown(requestId: string, contentDigest: string, attemptedVersion: number): TransactionReceipt {
+		if (this.busy) throw new Error("Cannot mark unknown during a transaction");
 		return this.receipts.markUnknown(requestId, contentDigest, attemptedVersion);
 	}
 
-	resolveUnknown(requestId: string, outcome: { committed: { version: number; contentDigest: string; at: number } } | { notCommitted: true }): void {
-		this.receipts.resolveUnknown(requestId, outcome, Date.now());
+	/** Complete snapshots must come from authoritative storage, never model-supplied receipt metadata. */
+	resolveUnknown(
+		requestId: string,
+		outcome:
+			| { committed: { version: number; contentDigest: string; at: number; snapshot: StoreSnapshot<S> } }
+			| { notCommitted: true },
+	): void {
+		if (this.busy) throw new Error("Cannot resolve during a transaction");
+		const existing = this.receipts.lookup(requestId);
+		if (!existing || existing.state !== "unknown") throw new Error(`No unknown receipt to resolve: ${requestId}`);
+		if (!("committed" in outcome)) {
+			this.receipts.resolveUnknown(requestId, outcome, Date.now());
+			return;
+		}
+		const committed = outcome.committed;
+		if (!committed.snapshot) throw new Error("Committed recovery requires a complete authoritative snapshot");
+		if (committed.contentDigest !== existing.contentDigest) throw new IdempotencyConflict(requestId);
+		const recovered = new TransactionalStore(this.state);
+		recovered.restore(committed.snapshot);
+		const receipt = recovered.receipts.lookup(requestId);
+		if (
+			!receipt ||
+			receipt.state !== "committed" ||
+			receipt.version !== committed.version ||
+			receipt.contentDigest !== committed.contentDigest ||
+			receipt.committedAt !== committed.at ||
+			receipt.version !== existing.version ||
+			recovered.version < this.version
+		)
+			throw new Error("Recovery snapshot does not match the unknown commit");
+		for (const prior of this.receipts.exportState().receipts) {
+			if (prior.requestId === requestId) continue;
+			const restored = recovered.receipts.lookup(prior.requestId);
+			if (!restored || digest(restored) !== digest(prior))
+				throw new Error("Recovery snapshot loses existing receipts");
+		}
+		this.restore(recovered.exportState());
 	}
 
-	exportState(): { version: 1; storeVersion: number; state: S; receipts: ReturnType<ReceiptLog["exportState"]>; outbox: ReturnType<Outbox["exportState"]> } {
+	exportState(): StoreSnapshot<S> {
 		return {
-			version: 1, storeVersion: this.version, state: structuredClone(this.state),
-			receipts: this.receipts.exportState(), outbox: this.outbox.exportState(),
+			version: 2,
+			storeVersion: this.version,
+			state: structuredClone(this.state),
+			receipts: this.receipts.exportState(),
+			outbox: this.outbox.exportState(),
 		};
 	}
 
-	restore(snapshot: ReturnType<TransactionalStore<S>["exportState"]>): void {
-		if (snapshot.version !== 1 || !Number.isSafeInteger(snapshot.storeVersion) || snapshot.storeVersion < 0) {
+	restore(snapshot: StoreSnapshot<S>): void {
+		if (this.busy) throw new Error("Cannot restore during a transaction");
+		if (
+			!snapshot ||
+			snapshot.version !== 2 ||
+			!Object.hasOwn(snapshot, "state") ||
+			!Number.isSafeInteger(snapshot.storeVersion) ||
+			snapshot.storeVersion < 0
+		)
 			throw new Error("Invalid store snapshot");
+		const state = structuredClone(snapshot.state);
+		const receipts = new ReceiptLog();
+		receipts.restore(snapshot.receipts);
+		if (
+			receipts
+				.exportState()
+				.receipts.some((receipt) => receipt.state === "committed" && receipt.version > snapshot.storeVersion)
+		) {
+			throw new Error("Store snapshot is older than its committed receipts");
 		}
-		this.state = structuredClone(snapshot.state);
+		const outbox = new Outbox();
+		outbox.restore(snapshot.outbox);
+		this.receipts.restore(receipts.exportState());
+		this.outbox.restore(outbox.exportState());
+		this.state = state;
 		this.version = snapshot.storeVersion;
-		this.receipts.restore(snapshot.receipts);
-		this.outbox.restore(snapshot.outbox);
 	}
 }

@@ -58,6 +58,53 @@ test("oversized artifacts are rejected against the configured limit", () => {
 	assert.throws(() => new ControlledArtifactStore({ maxArtifactBytes: 0 }));
 });
 
+test("F09 equal bytes preserve each scope and producer without exposing private metadata", () => {
+	const store = new ControlledArtifactStore();
+	const first = store.put("ok", { scope: "project:private", producedBy: identity, now: 1 });
+	const otherProducer = { ...identity, projectId: "public", taskId: "other" };
+	const second = store.put("ok", { scope: "project:public", producedBy: otherProducer, now: 2 });
+	assert.notEqual(first.artifactId, second.artifactId);
+	assert.equal(first.contentDigest, second.contentDigest);
+	assert.equal(second.scope, "project:public");
+	assert.deepEqual(second.producedBy, otherProducer);
+	assert.equal(second.producedAt, 2);
+	assert.throws(() => store.put("ok", { scope: "project:public", producedBy: otherProducer, artifactId: first.artifactId, now: 3 }), /immutable/);
+	first.producedBy.projectId = "changed";
+	assert.deepEqual(store.describe(first.artifactId, { readScopes: ["project:private"] }).producedBy, identity);
+	store.revoke(first.artifactId);
+	assert.equal(store.describe(second.artifactId, { readScopes: ["project:public"] }).scope, "project:public");
+});
+
+test("F10 nonzero automated exits never satisfy acceptance before or after restore", () => {
+	for (const kind of ["structural-check", "behavioral-check"]) {
+		const ledger = new AcceptanceLedger();
+		ledger.record({ clauseId: "tests", kind, artifact: artifact(), passed: true, commandDigest: "cmd", exitCode: 1,
+			summary: "failed process", recordedAt: 1, recordedBy: "checker", recorderKind: "trusted-automated-checker" });
+		const clauses = [{ clauseId: "tests", description: "must pass", requiredEvidence: [kind] }];
+		assert.equal(ledger.evaluate(clauses).accepted, false);
+		const restored = new AcceptanceLedger();
+		restored.restore(ledger.exportState());
+		assert.equal(restored.evaluate(clauses).accepted, false);
+	}
+});
+
+test("F10b restore applies every recorder rule atomically", () => {
+	const valid = { clauseId: "c1", kind: "human-acceptance", artifact: artifact(), passed: true, summary: "accepted",
+		recordedAt: 1, recordedBy: "user", recorderKind: "human" };
+	const ledger = new AcceptanceLedger();
+	ledger.record(valid);
+	const before = ledger.exportState();
+	for (const invalid of [
+		{ ...valid, recorderKind: "agent" },
+		{ ...valid, kind: "independent-review", recorderKind: "agent", reviewedWorkBy: "user" },
+		{ ...valid, kind: "structural-check", recorderKind: "trusted-automated-checker" },
+		{ ...valid, passed: "yes" },
+	]) {
+		assert.throws(() => ledger.restore({ version: 1, evidence: [valid, invalid] }));
+		assert.deepEqual(ledger.exportState(), before);
+	}
+});
+
 const artifact = () => new ControlledArtifactStore()
 	.put("evidence bytes", { scope: "project:p", producedBy: identity, now: 1 });
 
