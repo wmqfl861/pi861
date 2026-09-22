@@ -85,6 +85,13 @@ jobs:
           node-version: '22'
       - name: Install isolated published Pi host
         run: npm install --prefix "$RUNNER_TEMP/pi861-host" --no-save --no-package-lock --ignore-scripts @earendil-works/pi-coding-agent@0.86.1 typescript@5.9.3 @types/node@22.19.19
+      - name: Archive dependency-only test host
+        run: tar -czf "$RUNNER_TEMP/pi861-host.tgz" -C "$RUNNER_TEMP/pi861-host" node_modules
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pi861-isolated-host
+          path: ${{ runner.temp }}/pi861-host.tgz
+          retention-days: 1
       - name: Check native runtime against actual Pi types
         working-directory: extensions/pi861
         run: |
