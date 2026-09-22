@@ -40,6 +40,8 @@ export interface PiHost {
 	sendMessage(message: { customType: string; content: string; display: boolean }, options?: { triggerTurn?: boolean }): void;
 }
 export interface Pi861Options {
+	/** Full runtime owns /goal when enabled; legacy goal hooks stay inert. */
+	managedGoal?: boolean;
 	search?: SearchOptions;
 	goalMaxRuns?: number;
 	memory?: { backend?: MemoryBackend; scope?: string; autoRecall?: boolean; autoCapture?: boolean; maxContextBytes?: number };
@@ -245,7 +247,7 @@ export function installPi861(pi: PiHost, options: Pi861Options = {}): void {
 		if (again) queueContinuation(ctx);
 	});
 
-	pi.registerCommand("goal", {
+	if (!options.managedGoal) pi.registerCommand("goal", {
 		description: "Create a bounded goal; status | pause | resume | edit TEXT | budget N | accept | clear",
 		handler: async (args, ctx) => {
 			try {
@@ -270,7 +272,7 @@ export function installPi861(pi: PiHost, options: Pi861Options = {}): void {
 			} catch (error) { ctx.ui.notify(publicError(error), "error"); }
 		},
 	});
-	pi.registerTool({
+	if (!options.managedGoal) pi.registerTool({
 		name: "pi861_goal_report", label: "Goal progress",
 		description: "Report progress for the current goal run token. Completion only requests independent/user review. Does not grant more runs or permissions.",
 		parameters: { type: "object", properties: {

@@ -124,6 +124,24 @@ export class ModelRecovery {
 			health: [...this.health.entries()].map(([id, health]) => ({ id, ...health })),
 		};
 	}
+	exportState(): { version: 1; preferred: string; active: string; generation: number; options: RecoveryOptions; health: { id: string; revision: string; failures: number; successes: number; nextProbeAt: number; ready: boolean }[] } {
+		return { version: 1, preferred: this.preferred, active: this.active, generation: this.generation, options: { ...this.options },
+			health: [...this.health].map(([id, health]) => ({ id, revision: this.targets.get(id)?.revision ?? "", ...health })) };
+	}
+	restore(snapshot: ReturnType<ModelRecovery["exportState"]>): void {
+		if (this.attempt || snapshot.version !== 1 || !Number.isSafeInteger(snapshot.generation) || snapshot.generation < 0) throw new Error("Invalid recovery checkpoint");
+		validateOptions(snapshot.options); this.requireEligible(snapshot.preferred); this.requireEligible(snapshot.active);
+		const health = new Map<string, Health>();
+		for (const entry of snapshot.health) {
+			if (health.has(entry.id) || this.targets.get(entry.id)?.revision !== entry.revision || !Number.isSafeInteger(entry.failures) || entry.failures < 1 ||
+				!Number.isSafeInteger(entry.successes) || entry.successes < 0 || !Number.isFinite(entry.nextProbeAt) || typeof entry.ready !== "boolean") throw new Error("Invalid recovery health checkpoint");
+			health.set(entry.id, { failures: entry.failures, successes: entry.successes, nextProbeAt: entry.nextProbeAt, ready: entry.ready });
+		}
+		this.health.clear(); for (const [id, value] of health) this.health.set(id, value);
+		this.preferred = snapshot.preferred; this.active = snapshot.active; this.options = { ...snapshot.options };
+		this.generation = snapshot.generation + 1; this.probe = undefined; // Never restore an old request's execution authority.
+	}
+
 	setOptions(patch: Partial<RecoveryOptions>): void {
 		const next = { ...this.options, ...patch };
 		validateOptions(next);

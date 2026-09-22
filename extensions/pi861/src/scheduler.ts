@@ -111,7 +111,7 @@ export class TaskBoard {
 			(task.leaseUntil ?? 0) <= now) throw new Error("Stale or expired execution lease");
 		return task;
 	}
-	claim(workerId: string, capabilities: string[], now: number, leaseMs: number): TaskRecord | undefined {
+	claim(workerId: string, capabilities: string[], now: number, leaseMs: number, allowedTaskIds?: string[]): TaskRecord | undefined {
 		if (!workerId || !Number.isSafeInteger(leaseMs) || leaseMs <= 0 || !Number.isFinite(now)) {
 			throw new Error("Invalid worker or lease");
 		}
@@ -122,7 +122,7 @@ export class TaskBoard {
 		}
 		const done = new Set(tasks.filter((task) => task.status === "done").map((task) => task.id));
 		const ready = tasks.filter((task) => task.status === "queued" &&
-			task.attempts < this.options.maxAttempts && task.dependsOn.every((id) => done.has(id)) &&
+			task.attempts < this.options.maxAttempts && (allowedTaskIds === undefined || allowedTaskIds.includes(task.id)) && task.dependsOn.every((id) => done.has(id)) &&
 			task.capabilities.every((capability) => capabilities.includes(capability)) &&
 			!running.some((active) => scopesConflict(active.writeScopes, task.writeScopes)))
 			.sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0) || a.id.localeCompare(b.id));
