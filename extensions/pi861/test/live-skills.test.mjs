@@ -283,3 +283,69 @@ test("revoking grants also blocks stored result references", async t => {
   assert.match(JSON.stringify(await repo.readResult(reference, role)), /sensitive/);
   await assert.rejects(repo.readResult(reference, { ...role, grants: [] }), /not found/);
 });
+
+// AX5 groundwork coverage with a deterministic compiler fixture: merge, branch selection and
+// version pinning are pinned here so Phase B integration (auto-grouping, rebuild) inherits them.
+test("two generic sources compile into one merged runtime Skill", async t => {
+  const { directory, repo } = setup(t);
+  const second = join(directory, "source-b"); mkdirSync(second);
+  writeFileSync(join(second, "SKILL.md"), "---\nname: debug-b\ndescription: NEVER_AUTO_EXPOSE_B\n---\nCheck the logs. Preserve evidence.");
+  await repo.install(join(directory, "source"), { id: "debug-a", revision: "auto", group: "debug" });
+  await repo.install(second, { id: "debug-b", revision: "auto", group: "debug" });
+  const candidate = await repo.compile("debug", { async compile(input) {
+    assert.ok(input.documents.some(item => item.sourceId === "debug-a" && item.content.includes("Preserve evidence")));
+    assert.ok(input.documents.some(item => item.sourceId === "debug-b" && item.content.includes("Check the logs")));
+    return runtimeSkill("debug", [{ id: "general", when: "Program failure", instructions: "Reproduce, diagnose and verify. Check the logs.", environment: [], conflictsWith: [], tools: [] }]);
+  } }, signal());
+  await publish(repo, candidate);
+  const role = { id: "dev", skillIds: ["debug"], grants: [] };
+  assert.equal((await repo.browse(role, "development/debug")).skills.length, 1); // one entry, not one per source
+  assert.equal((await repo.catalog()).branches(role, "debug").length, 1);
+  assert.ok(!JSON.stringify(await repo.browse(role)).includes("NEVER_AUTO_EXPOSE_B")); // original descriptions stay hidden
+});
+
+test("environment-gated and mutually exclusive branches select correctly", async t => {
+  const { repo, source } = setup(t);
+  await repo.install(source, { id: "e", revision: "auto", group: "envs" });
+  const skill = runtimeSkill("envskill", [
+    { id: "general", when: "Program failure", instructions: "General debugging.", environment: [], conflictsWith: [], tools: [] },
+    { id: "browser", when: "Browser-only failure", instructions: "Collect console evidence.", environment: ["browser"], conflictsWith: ["general"], tools: [] },
+    { id: "console", when: "Console logs needed", instructions: "Read the console.", environment: ["browser"], conflictsWith: [], tools: [] },
+  ]);
+  await publish(repo, await repo.compile("envs", staticCompiler(skill), signal()));
+  const role = { id: "developer", skillIds: ["envskill"], grants: [] };
+  const published = (await repo.catalog()).browse(role)[0];
+  const plain = harness(t, { repository: repo, role: () => role, clients: [], environment: [], resourceRules: [] });
+  await assert.rejects(activateSkill(plain, "envskill", published.revision, ["general", "browser"], "execute"), /prerequisites/);
+  await activateSkill(plain, "envskill", published.revision, ["general"], "execute"); // available without the browser environment
+  const withBrowser = harness(t, { repository: repo, role: () => role, clients: [], environment: ["browser"], resourceRules: [] });
+  await activateSkill(withBrowser, "envskill", published.revision, ["browser"], "execute"); // available with it
+  await assert.rejects(activateSkill(withBrowser, "envskill", published.revision, ["general", "browser"], "execute"), /Conflicting/); // mutex holds
+  await activateSkill(withBrowser, "envskill", published.revision, ["browser", "console"], "execute"); // compatible supplements coexist
+});
+
+test("a new published version leaves running activations pinned; rollback restores", async t => {
+  const { repo, source } = setup(t);
+  await repo.install(source, { id: "a", revision: "auto", group: "debug" });
+  const instructions = text => [{ id: "general", when: "Failure", instructions: text, environment: [], conflictsWith: [], tools: [] }];
+  const v1 = await publish(repo, await repo.compile("debug", staticCompiler(runtimeSkill("debug", instructions("Version one instructions."))), signal()));
+  const role = { id: "dev", skillIds: ["debug"], grants: [] };
+  const h = harness(t, { repository: repo, role: () => role, clients: [], environment: [], resourceRules: [] });
+  // activateSkill returns a ToolResult whose text is the serialized Activation.
+  const first = JSON.parse((await activateSkill(h, "debug", v1.revision, ["general"], "execute")).content[0].text);
+  assert.equal(first.skillRevision, v1.revision);
+  assert.match(first.instructions, /Version one/);
+  writeFileSync(join(source, "SKILL.md"), "---\nname: debug\ndescription: NEVER_AUTO_EXPOSE_ORIGINAL\n---\nRead the error. Preserve evidence. Also check telemetry.");
+  await repo.install(source, { id: "a", revision: "auto", group: "debug" });
+  const v2 = await publish(repo, await repo.compile("debug", staticCompiler(runtimeSkill("debug", instructions("Version two instructions."))), signal()));
+  assert.notEqual(v2.revision, v1.revision);
+  assert.equal(first.skillRevision, v1.revision); // the running activation snapshot is unchanged
+  assert.match(first.instructions, /Version one/);
+  const second = JSON.parse((await activateSkill(h, "debug", v2.revision, ["general"], "execute")).content[0].text);
+  assert.equal(second.skillRevision, v2.revision);
+  assert.match(second.instructions, /Version two/);
+  await repo.rollback("debug", v1.revision);
+  const third = JSON.parse((await activateSkill(h, "debug", v1.revision, ["general"], "execute")).content[0].text);
+  assert.equal(third.skillRevision, v1.revision);
+  assert.match(third.instructions, /Version one/);
+});
