@@ -65,14 +65,18 @@ export function checkPrincipal(principal: MemoryPrincipal): void {
 		throw new Error("Invalid memory principal");
 	}
 }
+/** Records at or below this size may omit abstract/overview: a short record is its own summary at every depth. */
+export const SHORT_RECORD_FULL_BYTES = 2000;
 export function requireWrite(principal: MemoryPrincipal, scope: string): void {
 	if (!principal.writeScopes.includes(scope)) throw new Error("Memory scope not authorized");
 }
 export function validateMemory(input: MemoryWrite): void {
 	const item = input.item;
+	// Long records still require both summary segments: they are the L0/L1 access path.
+	const short = Buffer.byteLength(item.full, "utf8") <= SHORT_RECORD_FULL_BYTES;
 	if (!input.requestId || input.requestId.length > 200 || !item.id || item.id.length > 200 ||
 		!item.scope || !item.full.trim() || Buffer.byteLength(item.full, "utf8") > 262_144 ||
-		!item.abstract.trim() || !item.overview.trim() || !item.source.ref.trim() ||
+		(!short && (!item.abstract.trim() || !item.overview.trim())) || !item.source.ref.trim() ||
 		!["constraint", "working", "project", "experience", "evidence"].includes(item.kind) ||
 		!["candidate", "confirmed"].includes(item.status) ||
 		!["user", "tool", "inference", "recall"].includes(item.source.kind) ||
@@ -207,7 +211,8 @@ export function contextPack(
 	let omitted = 0;
 	for (const item of items) {
 		if (item.status === "withdrawn" || options.confirmedOnly && item.status !== "confirmed") continue;
-		const body = options.level === 0 ? item.abstract : options.level === 1 ? item.overview : item.full;
+		// A missing segment on a short record falls back to the full text instead of packing an empty body.
+		const body = options.level === 0 ? item.abstract || item.full : options.level === 1 ? item.overview || item.full : item.full;
 		const line = JSON.stringify({
 			id: item.id, scope: item.scope, revision: item.revision, status: item.status,
 			source: item.source, content: body,
