@@ -21,6 +21,7 @@ export class McpClient {
 	private protocol = "2025-11-25";
 	private generation = 0;
 	private dirty = true;
+	private changeToken = 0;
 	private cached: McpTool[] = [];
 	constructor(server: McpServer) {
 		if (!/^[a-zA-Z0-9_-]+$/.test(server.id) || !server.accountId) throw new Error("Invalid MCP server identity");
@@ -35,7 +36,10 @@ export class McpClient {
 		this.server = structuredClone(server);
 	}
 	private message(event: Record<string, unknown>): void {
-		if (event.method === "notifications/tools/list_changed") this.dirty = true;
+		if (typeof event.method === "string" && /^notifications\/(tools|resources|prompts)\/list_changed$/.test(event.method)) {
+			this.dirty = true;
+			this.changeToken++;
+		}
 		if (event.type === "process_error") { this.connected = undefined; this.dirty = true; }
 		if (event.id !== undefined && typeof event.method === "string") {
 			// No model sampling, elicitation or execution initiated by an untrusted server.
@@ -135,20 +139,45 @@ export class McpClient {
 	private async raw(method: string, params: Record<string, unknown>, signal: AbortSignal): Promise<unknown> {
 		const id = randomUUID();
 		const payload = { jsonrpc: "2.0", method, params, id };
+		let dispatched = false;
+		// Client-side abandonment alone leaves the server working blindly; tell it the request is
+		// cancelled. The dispatch outcome stays unknown either way, so cancellation is never a replay license.
+		const onAbort = (): void => { if (dispatched) this.notifyCancelled(id); };
+		signal.addEventListener("abort", onAbort, { once: true });
 		let reply: Record<string, unknown> | undefined;
 		try {
-			reply = this.process ? await this.process.request(payload, signal, this.server.timeoutMs ?? 30_000) : await this.http(payload, signal);
+			if (this.process) {
+				signal.throwIfAborted();
+				const pending = this.process.request(payload, signal, this.server.timeoutMs ?? 30_000);
+				dispatched = true;
+				reply = await pending;
+			} else {
+				signal.throwIfAborted();
+				dispatched = true;
+				reply = await this.http(payload, signal);
+			}
 		} catch (error) {
 			if (error instanceof McpFailure) throw error;
 			throw new McpFailure(signal.aborted ? "MCP call cancelled; reconcile any dispatched operation" : "MCP transport failed", method === "tools/call" ? "unknown" : "not_dispatched");
+		} finally {
+			signal.removeEventListener("abort", onAbort);
 		}
 		if (reply?.error) throw new McpFailure("MCP server reported an operation error", "reported_error");
 		if (!reply || !("result" in reply)) throw new Error("Missing MCP result");
 		return reply.result;
 	}
+	/** Best effort: a notification for an id the server never saw is harmlessly ignored by JSON-RPC rules. */
+	private notifyCancelled(id: string): void {
+		void this.notify("notifications/cancelled", { requestId: id, reason: "client aborted the request" }, new AbortController().signal)
+			.catch(() => { /* the connection may already be gone; the outcome remains unknown */ });
+	}
 	async tools(signal: AbortSignal, refresh = false): Promise<McpTool[]> {
 		await this.connect(signal);
 		if (!this.dirty && !refresh) return structuredClone(this.cached);
+		// A list_changed notification that arrives while the listing is in flight must survive it:
+		// the fetched list predates the announced change, so only clear dirty when no notification
+		// was observed since the fetch started.
+		const token = this.changeToken;
 		const tools: McpTool[] = [], seen = new Set<string>(), cursors = new Set<string>();
 		let cursor: string | undefined;
 		for (let page = 0; page < 100; page++) {
@@ -163,7 +192,7 @@ export class McpClient {
 					inputSchema, schemaHash: digest({ name: tool.name, inputSchema }) });
 				if (tools.length > 10_000) throw new Error("MCP tool list too large");
 			}
-			if (!result.nextCursor) { this.cached = tools; this.dirty = false; return structuredClone(tools); }
+			if (!result.nextCursor) { this.cached = tools; if (token === this.changeToken) this.dirty = false; return structuredClone(tools); }
 			if (typeof result.nextCursor !== "string" || cursors.has(result.nextCursor)) throw new Error("Invalid MCP pagination");
 			cursor = result.nextCursor; cursors.add(cursor);
 		}

@@ -55,7 +55,8 @@ export class LineProcess {
 	}
 	async request(value: Record<string, unknown>, signal: AbortSignal, timeoutMs = 30_000): Promise<Record<string, unknown>> {
 		signal.throwIfAborted();
-		const id = randomUUID();
+		// Honor a caller-supplied id so protocol-level cancellation can reference the wire request.
+		const id = typeof value.id === "string" && value.id ? value.id : randomUUID();
 		const effective = AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]);
 		let listener: (() => void) | undefined;
 		try {
