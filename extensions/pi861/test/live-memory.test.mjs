@@ -152,7 +152,10 @@ test("assembly installs constraints and working state without keyword recall", a
   await memory.put({ requestId: "rc", expectedRevision: null, item: { ...item("c"), kind: "constraint", full: "Always parameterize SQL; never concatenate user input into queries.", abstract: "SQL 安全规则", overview: "SQL 安全规则" } });
   await memory.put({ requestId: "rw", expectedRevision: null, item: { ...item("w"), kind: "working", full: "正在修复 enrich 重试逻辑。", abstract: "", overview: "" } });
   await memory.put({ requestId: "re", expectedRevision: null, item: { ...item("e"), kind: "experience", full: "x".repeat(3000), abstract: "long experience abstract", overview: "long experience overview" } });
-  const pack = await memory.assemble({ maxBytes: 5000 });
+  const boot = await memory.assemble({ maxBytes: 5000 });
+  assert.deepEqual(boot.included.map(entry => entry.kind), ["constraint", "working"]);
+  const pack = await memory.assemble({ mode: "event-recall", maxBytes: 5000 });
+  assert.equal(pack.usedBytes, Buffer.byteLength(pack.text, "utf8"));
   assert.deepEqual(pack.included.map(entry => entry.kind), ["constraint", "working", "experience"]);
   assert.equal(pack.included[0].level, 2); assert.equal(pack.included[1].level, 1); assert.equal(pack.included[2].level, 0);
   assert.ok(pack.text.includes("never concatenate"));
@@ -161,7 +164,7 @@ test("assembly installs constraints and working state without keyword recall", a
   assert.ok(!pack.text.includes("x".repeat(100)));
   const lines = pack.text.split("\n").map(line => JSON.parse(line));
   assert.equal(lines[0].kind, "constraint");
-  const tight = await memory.assemble({ maxBytes: Buffer.byteLength(pack.text.split("\n")[0], "utf8") });
+  const tight = await memory.assemble({ mode: "event-recall", maxBytes: Buffer.byteLength(pack.text.split("\n")[0], "utf8") });
   assert.deepEqual(tight.included.map(entry => entry.kind), ["constraint"]);
   assert.equal(tight.omitted, 2);
 });

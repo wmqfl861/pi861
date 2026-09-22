@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { PostgresMemory } from "../src/postgres.ts";
+import { recordFingerprints, toRecord } from "../src/memory-records.ts";
 
 const principal = { tenantId: "tenant1", principalId: "agent1", readScopes: ["project:p1"], writeScopes: ["project:p1"] };
 const input = { requestId: "request1", expectedRevision: null, item: {
 	id: "fact1", scope: "project:p1", kind: "project", abstract: "A", overview: "Overview", full: "A durable fact",
 	source: { kind: "user", ref: "event:1" }, status: "confirmed",
 } };
+function recordBody(overrides = {}) {
+	return { ...structuredClone(toRecord({ ...input.item, revision: 1, updatedAt: 10 })), ...overrides };
+}
 function database(handler = () => ({ rows: [] })) {
 	const calls = [];
 	let releases = 0;
@@ -20,15 +24,20 @@ function database(handler = () => ({ rows: [] })) {
 	} };
 	return { calls, pool, get releases() { return releases; }, get connections() { return connections; } };
 }
-test("writes commit canonical item, version, outbox and receipt together", async () => {
+test("writes commit record body, version, event and receipt together", async () => {
 	const db = database();
 	const result = await new PostgresMemory(db.pool, principal).put(input);
 	assert.equal(result.state, "committed");
 	assert.equal(db.calls[0].sql, "BEGIN");
 	assert.equal(db.calls.at(-1).sql, "COMMIT");
-	for (const table of ["pi861_memory_items", "pi861_memory_versions", "pi861_memory_outbox", "pi861_memory_receipts"])
+	for (const table of ["pi861_memory_items", "pi861_memory_versions", "pi861_memory_events", "pi861_memory_receipts"])
 		assert.ok(db.calls.some((call) => call.sql.startsWith(`INSERT INTO ${table}`)));
 	assert.equal(db.releases, 1);
+	const itemWrite = db.calls.find((call) => call.sql.startsWith("INSERT INTO pi861_memory_items"));
+	const stored = JSON.parse(itemWrite.params[4]);
+	assert.equal(stored.purpose, "project");
+	assert.deepEqual(stored.scope, { kind: "project", key: "p1" });
+	assert.equal(stored.provenance[0].sourceKind, "user");
 	const settings = db.calls.find((call) => call.sql.includes("set_config"));
 	assert.deepEqual(settings.params.slice(0, 2), ["tenant1", "agent1"]);
 	assert.match(settings.sql, /true/);
@@ -52,6 +61,22 @@ test("ambiguous commit response rejects and keeps original request identity repl
 	const receiptWrite = db.calls.find((call) => call.sql.startsWith("INSERT INTO pi861_memory_receipts"));
 	assert.equal(receiptWrite.params[2], "request1");
 });
+test("reconcile adjudicates an interrupted commit from the database truth", async () => {
+	let receipt;
+	const writer = database((sql, params) => {
+		if (sql.startsWith("INSERT INTO pi861_memory_receipts")) receipt = { intent_hash: params[4], receipt: JSON.parse(params[5]) };
+		return { rows: [] };
+	});
+	const store = new PostgresMemory(writer.pool, principal);
+	const original = await store.put(input);
+	const committed = database((sql) => ({ rows: sql.startsWith("SELECT intent_hash") ? [receipt] : [] }));
+	assert.deepEqual(await new PostgresMemory(committed.pool, principal).reconcile("request1", receipt.intent_hash),
+		{ state: "committed", receipt: original });
+	const missing = database();
+	assert.deepEqual(await new PostgresMemory(missing.pool, principal).reconcile("request1", "any"), { state: "notCommitted" });
+	const mismatch = database((sql) => ({ rows: sql.startsWith("SELECT intent_hash") ? [{ intent_hash: "different", receipt: {} }] : [] }));
+	await assert.rejects(new PostgresMemory(mismatch.pool, principal).reconcile("request1", "any"), /replayed with different content/);
+});
 test("replay returns original receipt and never rewrites data", async () => {
 	let stored;
 	const first = database((sql, params) => {
@@ -63,16 +88,21 @@ test("replay returns original receipt and never rewrites data", async () => {
 	assert.deepEqual(await new PostgresMemory(second.pool, principal).put(input), original);
 	assert.ok(second.calls.every((call) => !call.sql.startsWith("INSERT")));
 });
-test("idempotency mismatch rejects without changing an existing record", async () => {
+test("same requestId with different content is an idempotency conflict", async () => {
 	const db = database((sql) => ({ rows: sql.startsWith("SELECT intent_hash") ? [{ intent_hash: "different", receipt: {} }] : [] }));
-	await assert.rejects(new PostgresMemory(db.pool, principal).put(input), /idempotency/);
+	await assert.rejects(new PostgresMemory(db.pool, principal).put(input), /replayed with different content/);
 	assert.equal(db.calls.at(-1).sql, "ROLLBACK");
 	assert.ok(db.calls.every((call) => !call.sql.startsWith("INSERT")));
 });
 test("stale revisions fail before publication", async () => {
-	const db = database((sql) => ({ rows: sql.startsWith("SELECT body") ? [{ body: { ...input.item, revision: 2, updatedAt: 0 } }] : [] }));
-	await assert.rejects(new PostgresMemory(db.pool, principal).put({ ...input, expectedRevision: 1 }), /revision/);
+	const db = database((sql) => ({ rows: sql.startsWith("SELECT body FROM pi861_memory_items") ? [{ body: recordBody({ revision: 2 }) }] : [] }));
+	await assert.rejects(new PostgresMemory(db.pool, principal).put({ ...input, expectedRevision: 1 }), /Version conflict: expected 1, store is at 2/);
 	assert.ok(db.calls.every((call) => !call.sql.startsWith("INSERT")));
+});
+test("legacy kernel bodies are refused until migrated", async () => {
+	const legacy = { ...input.item, revision: 1, updatedAt: 0 };
+	const db = database((sql) => ({ rows: sql.startsWith("SELECT body FROM pi861_memory_items") ? [{ body: legacy }] : [] }));
+	await assert.rejects(new PostgresMemory(db.pool, principal).withdraw("w1", "project:p1", "fact1", 1), /run the pi861 v3 record-model migration/);
 });
 test("unauthorized scope does not connect to the database", async () => {
 	const db = database();
@@ -84,17 +114,19 @@ test("unauthorized scope does not connect to the database", async () => {
 test("search uses parameters and explicit tenant and allowed scopes", async () => {
 	const db = database();
 	await new PostgresMemory(db.pool, principal).search("'); DROP TABLE t; --");
-	const call = db.calls.find((entry) => entry.sql.startsWith("SELECT body"));
+	const call = db.calls.find((entry) => entry.sql.startsWith("SELECT i.body"));
 	assert.ok(!call.sql.includes("DROP TABLE"));
 	assert.equal(call.params[0], "tenant1");
 	assert.deepEqual(call.params[1], ["project:p1"]);
 	assert.equal(call.params[2], "'); DROP TABLE t; --");
 });
-test("withdrawal commits content and source tombstones and an invalidation event", async () => {
-	const db = database((sql) => ({ rows: sql.startsWith("SELECT body") ? [{ body: { ...input.item, revision: 1, updatedAt: 0 } }] : [] }));
+test("withdrawal commits record tombstones and an invalidation event", async () => {
+	const db = database((sql) => ({ rows: sql.startsWith("SELECT body FROM pi861_memory_items") ? [{ body: recordBody() }] : [] }));
 	await new PostgresMemory(db.pool, principal).withdraw("withdraw1", "project:p1", "fact1", 1);
-	assert.equal(db.calls.filter((call) => call.sql.startsWith("INSERT INTO pi861_memory_tombstones")).length, 2);
-	const event = db.calls.find((call) => call.sql.startsWith("INSERT INTO pi861_memory_outbox"));
+	assert.deepEqual(db.calls.filter((call) => call.sql.startsWith("INSERT INTO pi861_memory_tombstones")).map(call => call.params[2]).sort(), recordFingerprints(recordBody()).sort());
+	const event = db.calls.find((call) => call.sql.startsWith("INSERT INTO pi861_memory_events"));
 	assert.equal(event.params[4], "withdraw");
+	assert.match(event.sql, /ON CONFLICT\(tenant_id,event_digest\) DO NOTHING/);
+	assert.ok(db.calls.some((call) => call.sql.startsWith("DELETE FROM pi861_memory_projections")));
 	assert.equal(db.calls.at(-1).sql, "COMMIT");
 });

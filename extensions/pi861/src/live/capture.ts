@@ -1,4 +1,5 @@
 import { digest, type MemoryBackend, type MemoryInput } from "../memory.ts";
+import { type MemoryRecord, toRecord } from "../memory-records.ts";
 
 /**
  * Governance for automatic capture of tool results into memory.
@@ -31,50 +32,159 @@ export interface ToolObservation {
 export interface PlannedCapture {
 	requestId: string;
 	item: MemoryInput;
+	/** C6 view of the same capture: provenance chain (sourceKind "tool"), fingerprints, contract validation. */
+	record: MemoryRecord;
 	mode: "direct" | "reference";
 	reason?: "oversize" | "sensitive" | "unserializable";
 }
-function referenceItem(id: string, scope: string, toolName: string, descriptor: string, source: MemoryInput["source"]): MemoryInput {
+function planned(
+	requestId: string,
+	item: MemoryInput,
+	mode: "direct" | "reference",
+	reason: "oversize" | "sensitive" | "unserializable" | undefined,
+	at: number,
+): PlannedCapture {
+	return {
+		requestId,
+		item,
+		record: toRecord({ ...item, revision: 1, updatedAt: at, status: "candidate" }),
+		mode,
+		...(reason ? { reason } : {}),
+	};
+}
+function referenceItem(
+	id: string,
+	scope: string,
+	toolName: string,
+	descriptor: string,
+	source: MemoryInput["source"],
+): MemoryInput {
 	const note = `Tool result stored as a controlled reference (${toolName}); original payload withheld, see record body for digest and retrieval state.`;
-	return { id, scope, kind: "evidence", status: "candidate", full: descriptor, abstract: note, overview: note, source };
+	return {
+		id,
+		scope,
+		kind: "evidence",
+		status: "candidate",
+		full: descriptor,
+		abstract: note,
+		overview: note,
+		source,
+	};
 }
 export function planToolCapture(observation: ToolObservation, scope: string): PlannedCapture {
 	const id = digest([observation.sessionId, observation.toolCallId]);
+	const at = Date.now();
 	const source = { kind: "tool" as const, ref: `pi-session:${observation.sessionId}/tool:${observation.toolCallId}` };
 	let payload: string;
 	try {
-		payload = JSON.stringify({ tool: observation.toolName, result: observation.result, isError: observation.isError === true });
+		payload = JSON.stringify({
+			tool: observation.toolName,
+			result: observation.result,
+			isError: observation.isError === true,
+		});
 	} catch {
 		// Cyclic or exotic values still leave a durable reference; the event is never lost silently.
-		const descriptor = JSON.stringify({ capture: "tool-reference", tool: observation.toolName, sessionId: observation.sessionId,
-			toolCallId: observation.toolCallId, isError: observation.isError === true, withheld: "unserializable-result", storedAt: Date.now() });
-		return { requestId: id, mode: "reference", reason: "unserializable", item: referenceItem(id, scope, observation.toolName, descriptor, source) };
+		const descriptor = JSON.stringify({
+			capture: "tool-reference",
+			tool: observation.toolName,
+			sessionId: observation.sessionId,
+			toolCallId: observation.toolCallId,
+			isError: observation.isError === true,
+			withheld: "unserializable-result",
+		});
+		return planned(
+			id,
+			referenceItem(id, scope, observation.toolName, descriptor, source),
+			"reference",
+			"unserializable",
+			at,
+		);
 	}
-	const bytes = Buffer.byteLength(payload, "utf8"), contentDigest = digest(payload);
+	const bytes = Buffer.byteLength(payload, "utf8"),
+		contentDigest = digest(payload);
 	const sensitive = sensitiveRule(payload);
 	if (sensitive) {
-		const descriptor = JSON.stringify({ capture: "tool-reference", tool: observation.toolName, sessionId: observation.sessionId,
-			toolCallId: observation.toolCallId, isError: observation.isError === true, bytes, contentDigest, withheld: "sensitive", matchedRule: sensitive });
-		return { requestId: id, mode: "reference", reason: "sensitive", item: referenceItem(id, scope, observation.toolName, descriptor, source) };
+		const descriptor = JSON.stringify({
+			capture: "tool-reference",
+			tool: observation.toolName,
+			sessionId: observation.sessionId,
+			toolCallId: observation.toolCallId,
+			isError: observation.isError === true,
+			bytes,
+			contentDigest,
+			withheld: "sensitive",
+			matchedRule: sensitive,
+		});
+		return planned(
+			id,
+			referenceItem(id, scope, observation.toolName, descriptor, source),
+			"reference",
+			"sensitive",
+			at,
+		);
 	}
 	if (bytes > CAPTURE_DIRECT_MAX_BYTES) {
 		const preview = `${payload.slice(0, CAPTURE_REFERENCE_PREVIEW_BYTES)}\n[preview truncated; full payload omitted, verify against contentDigest]`;
-		const safePreview = looksSensitive(preview) ? "[preview withheld: potential credential at truncation boundary]" : preview;
-		const descriptor = JSON.stringify({ capture: "tool-reference", tool: observation.toolName, sessionId: observation.sessionId,
-			toolCallId: observation.toolCallId, isError: observation.isError === true, bytes, contentDigest, truncated: true, preview: safePreview });
-		return { requestId: id, mode: "reference", reason: "oversize", item: referenceItem(id, scope, observation.toolName, descriptor, source) };
+		const safePreview = looksSensitive(preview)
+			? "[preview withheld: potential credential at truncation boundary]"
+			: preview;
+		const descriptor = JSON.stringify({
+			capture: "tool-reference",
+			tool: observation.toolName,
+			sessionId: observation.sessionId,
+			toolCallId: observation.toolCallId,
+			isError: observation.isError === true,
+			bytes,
+			contentDigest,
+			truncated: true,
+			preview: safePreview,
+		});
+		return planned(
+			id,
+			referenceItem(id, scope, observation.toolName, descriptor, source),
+			"reference",
+			"oversize",
+			at,
+		);
 	}
-	return { requestId: id, mode: "direct", item: { id, scope, kind: "evidence", status: "candidate", full: payload,
-		abstract: `Tool result: ${observation.toolName}`, overview: payload.slice(0, 1000), source } };
+	return planned(
+		id,
+		{
+			id,
+			scope,
+			kind: "evidence",
+			status: "candidate",
+			full: payload,
+			abstract: `Tool result: ${observation.toolName}`,
+			overview: payload.slice(0, 1000),
+			source,
+		},
+		"direct",
+		undefined,
+		at,
+	);
 }
-export interface CaptureOutcome { status: "captured" | "referenced" | "failed"; id: string; error?: string; }
+export interface CaptureOutcome {
+	status: "captured" | "referenced" | "failed";
+	id: string;
+	error?: string;
+}
 /** Never throws: a failed capture is reported to the host instead of breaking the tool pipeline. */
-export async function captureToolResult(backend: Pick<MemoryBackend, "put">, observation: ToolObservation, scope: string): Promise<CaptureOutcome> {
+export async function captureToolResult(
+	backend: Pick<MemoryBackend, "put">,
+	observation: ToolObservation,
+	scope: string,
+): Promise<CaptureOutcome> {
 	try {
 		const plan = planToolCapture(observation, scope);
 		await backend.put({ requestId: plan.requestId, expectedRevision: null, item: plan.item });
 		return { status: plan.mode === "direct" ? "captured" : "referenced", id: plan.item.id };
 	} catch (error) {
-		return { status: "failed", id: "", error: (error instanceof Error ? error.message : "memory capture failed").slice(0, 300) };
+		const message = error instanceof Error ? error.message : "memory capture failed";
+		return {
+			status: "failed",
+			id: digest([observation.sessionId, observation.toolCallId]),
+			error: looksSensitive(message) ? "memory capture failed (details withheld)" : message.slice(0, 300),
+		};
 	}
 }
