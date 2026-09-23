@@ -1,9 +1,11 @@
 import { closeSync, fsyncSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
-import type { OutboxOutcome } from "../contracts/storage.ts";
+import { IdempotencyConflict, type OutboxOutcome, VersionConflict } from "../contracts/storage.ts";
 import {
+	BudgetExhausted,
 	type BudgetLimits,
 	type MeteredKind,
+	ProbeInFlight,
 	TaskTreeBudget,
 	type UsageMeasure,
 	type UsageReservation,
@@ -12,6 +14,7 @@ import { type PersistentLease, issueLease, leaseValid } from "../contracts/lifec
 import { digest } from "../contracts/hash.ts";
 import { isValidScope } from "../contracts/identity.ts";
 import {
+	type MemoryInput,
 	type MemoryItem,
 	type MemoryPrincipal,
 	type MemoryReceipt,
@@ -386,8 +389,20 @@ export class StorageSession {
 		});
 	}
 	async leaseValidAt(purpose: string, generation: number): Promise<boolean> {
-		const lease = await this.leaseSnapshot(purpose);
-		return lease !== undefined && leaseValid(lease, generation, Date.now());
+		// The verdict must come from one transaction with the DATABASE clock: lease rows
+		// carry DB timestamps, and mixing in a client clock that lags the server made
+		// freshly acquired leases fail fencing during the clock skew window.
+		return this.transaction(async (connection) => {
+			const now = Number(
+				(await connection.query("SELECT (extract(epoch FROM clock_timestamp())*1000)::bigint AS now")).rows[0]?.now,
+			);
+			const found = await connection.query(
+				"SELECT owner, token, generation, acquired_at, expires_at, lease_id FROM pi861_leases WHERE tenant_id=$1 AND purpose=$2",
+				[this.identity.tenantId, purpose],
+			);
+			const lease = this.leaseRow(found.rows[0], purpose, true);
+			return lease !== undefined && Number.isFinite(now) && leaseValid(lease, generation, now);
+		});
 	}
 	private leaseRow(
 		row: Record<string, unknown> | undefined,
@@ -488,6 +503,226 @@ export class StorageService {
 	}
 	async session(token: string): Promise<StorageSession> {
 		return new StorageSession(this.data, await this.directory.resolve(token));
+	}
+}
+
+/** Anything able to open authenticated sessions; StorageService satisfies this. */
+export interface SessionSource {
+	session(token: string): Promise<StorageSession>;
+}
+
+export interface StorageServiceResponse {
+	status: number;
+	/** Pre-serialized JSON: the transport must write the status line exactly once, after this. */
+	body: string;
+}
+
+const STORAGE_OPERATION_NAMES = [
+	"put",
+	"withdraw",
+	"get",
+	"search",
+	"list",
+	"delta",
+	"reconcile",
+	"listJobs",
+	"requeueJob",
+	"createBudget",
+	"registerBudgetTask",
+	"reserveBudget",
+	"settleBudget",
+	"settleBudgetUnknown",
+	"releaseBudget",
+	"budgetUsage",
+	"acquireLease",
+	"renewLease",
+	"releaseLease",
+	"leaseSnapshot",
+	"claimEvents",
+	"completeEvent",
+] as const;
+export type StorageOperationName = (typeof STORAGE_OPERATION_NAMES)[number];
+
+type OperationHandler = (session: StorageSession, args: Record<string, unknown>) => Promise<unknown>;
+
+function operationString(value: unknown, field: string): string {
+	if (typeof value !== "string" || !value) throw new Error(`Field ${field} must be a non-empty string`);
+	return value;
+}
+function operationNumber(value: unknown, field: string): number {
+	if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(`Field ${field} must be a finite number`);
+	return value;
+}
+function operationOptionalString(value: unknown, field: string): string | undefined {
+	return value === undefined || value === null ? undefined : operationString(value, field);
+}
+const METERED_KINDS = ["execution", "reception", "planning", "skill-compile", "distill", "probe", "auxiliary"] as const;
+function operationKind(value: unknown): MeteredKind {
+	const name = operationString(value, "kind");
+	if (!METERED_KINDS.includes(name as (typeof METERED_KINDS)[number])) throw new Error(`Field kind is not a metered kind: ${name}`);
+	return name as MeteredKind;
+}
+function operationOutcome(value: unknown): OutboxOutcome {
+	if (value === "dispatched" || value === "failed-terminal") return value;
+	if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+		const record = value as Record<string, unknown>;
+		return {
+			retryAfterMs: operationNumber(record.retryAfterMs, "outcome.retryAfterMs"),
+			error: operationString(record.error, "outcome.error"),
+		};
+	}
+	throw new Error("Field outcome must be a completion outcome");
+}
+
+/** Scoped operations; every handler receives only the server-resolved session. */
+const STORAGE_OPERATIONS: Record<StorageOperationName, OperationHandler> = {
+	put: (session, args) =>
+		session.put({
+			requestId: operationString(args.requestId, "requestId"),
+			expectedRevision:
+				args.expectedRevision === null || args.expectedRevision === undefined
+					? null
+					: operationNumber(args.expectedRevision, "expectedRevision"),
+			item: args.item as MemoryInput,
+		}),
+	withdraw: (session, args) =>
+		session.withdraw(
+			operationString(args.requestId, "requestId"),
+			operationString(args.scope, "scope"),
+			operationString(args.id, "id"),
+			operationNumber(args.expectedRevision, "expectedRevision"),
+		),
+	get: (session, args) => session.get(operationString(args.scope, "scope"), operationString(args.id, "id")),
+	search: (session, args) =>
+		session.search(operationString(args.query, "query"), args.limit === undefined ? undefined : operationNumber(args.limit, "limit")),
+	list: (session, args) =>
+		session.list(
+			operationString(args.scope, "scope"),
+			operationOptionalString(args.afterId, "afterId"),
+			args.limit === undefined ? undefined : operationNumber(args.limit, "limit"),
+		),
+	delta: (session, args) =>
+		session.delta(
+			args.afterSequence === undefined ? undefined : operationNumber(args.afterSequence, "afterSequence"),
+			args.limit === undefined ? undefined : operationNumber(args.limit, "limit"),
+		),
+	reconcile: (session, args) =>
+		session.reconcile(operationString(args.requestId, "requestId"), operationOptionalString(args.expectedDigest, "expectedDigest")),
+	listJobs: (session) => session.listJobs(),
+	requeueJob: (session, args) => session.requeueJob(operationString(args.jobId, "jobId")),
+	createBudget: (session, args) =>
+		session.createBudget(
+			args.rootLimits as BudgetLimits,
+			args.budgetId === undefined ? undefined : operationString(args.budgetId, "budgetId"),
+		),
+	registerBudgetTask: (session, args) =>
+		session.registerBudgetTask(
+			operationString(args.budgetId, "budgetId"),
+			operationString(args.taskId, "taskId"),
+			args.parentTaskId === null || args.parentTaskId === undefined ? null : operationString(args.parentTaskId, "parentTaskId"),
+			args.subtreeLimits as BudgetLimits | undefined,
+		),
+	reserveBudget: (session, args) =>
+		session.reserveBudget(
+			operationString(args.budgetId, "budgetId"),
+			args.taskId === null || args.taskId === undefined ? null : operationString(args.taskId, "taskId"),
+			operationKind(args.kind),
+			args.estimate as UsageMeasure,
+			args.probeKey === undefined ? {} : { probeKey: operationString(args.probeKey, "probeKey") },
+		),
+	settleBudget: (session, args) =>
+		session.settleBudget(
+			operationString(args.budgetId, "budgetId"),
+			operationString(args.reservationId, "reservationId"),
+			args.actual as UsageMeasure,
+		),
+	settleBudgetUnknown: (session, args) =>
+		session.settleBudgetUnknown(
+			operationString(args.budgetId, "budgetId"),
+			operationString(args.reservationId, "reservationId"),
+			args.conservativeEstimate as UsageMeasure,
+		),
+	releaseBudget: (session, args) =>
+		session.releaseBudget(operationString(args.budgetId, "budgetId"), operationString(args.reservationId, "reservationId")),
+	budgetUsage: (session, args) => session.budgetUsage(operationString(args.budgetId, "budgetId")),
+	acquireLease: (session, args) =>
+		session.acquireLease(operationString(args.purpose, "purpose"), operationString(args.owner, "owner"), operationNumber(args.leaseMs, "leaseMs")),
+	renewLease: (session, args) =>
+		session.renewLease(operationString(args.purpose, "purpose"), operationString(args.token, "token"), operationNumber(args.leaseMs, "leaseMs")),
+	releaseLease: (session, args) =>
+		session.releaseLease(operationString(args.purpose, "purpose"), operationString(args.token, "token")),
+	leaseSnapshot: (session, args) => session.leaseSnapshot(operationString(args.purpose, "purpose")),
+	claimEvents: (session, args) => session.claimEvents(args.limit === undefined ? undefined : operationNumber(args.limit, "limit")),
+	completeEvent: (session, args) => session.completeEvent(operationNumber(args.sequence, "sequence"), operationOutcome(args.outcome)),
+};
+
+function storageErrorStatus(error: unknown): number {
+	if (error instanceof ServiceAuthenticationError) return 401;
+	if (error instanceof IdempotencyConflict || error instanceof VersionConflict) return 409;
+	if (error instanceof BudgetExhausted || error instanceof ProbeInFlight) return 429;
+	if (error instanceof LeaseNotHeld) return 409;
+	if (error instanceof StorageSchemaError) return 503;
+	return 400;
+}
+
+function storageErrorBody(error: unknown): string {
+	const message = error instanceof Error ? error.message : "storage service request failed";
+	const code = error instanceof Error ? error.constructor.name : "Error";
+	// Error payloads are plain strings; this serialization cannot throw for them.
+	return JSON.stringify({ ok: false, error: { code, message } });
+}
+
+/**
+ * Wire dispatcher for the storage service entry. Three review-driven invariants:
+ * 1. the operation allowlist is matched with Object.hasOwn against a frozen name
+ *    list, so prototype keys ("constructor", "__proto__", "valueOf", ...) can never
+ *    resolve to an inherited function;
+ * 2. responses are fully serialized BEFORE any status is reported, so a result that
+ *    cannot be encoded becomes a single 500 error response instead of a second
+ *    writeHead after headers were already sent;
+ * 3. handle() never throws: every failure path returns a pre-serialized response.
+ */
+export class StorageOperationDispatcher {
+	private readonly source: SessionSource;
+	constructor(source: SessionSource) {
+		this.source = source;
+	}
+	async handle(token: string, body: unknown): Promise<StorageServiceResponse> {
+		let name: string;
+		let args: Record<string, unknown>;
+		try {
+			if (body === null || typeof body !== "object" || Array.isArray(body)) throw new Error("Request body must be an object");
+			const record = body as Record<string, unknown>;
+			name = operationString(record.op, "op");
+			if (record.args !== undefined && record.args !== null) {
+				if (typeof record.args !== "object" || Array.isArray(record.args)) throw new Error("Field args must be an object");
+				args = record.args as Record<string, unknown>;
+			} else {
+				args = {};
+			}
+		} catch (error) {
+			return { status: 400, body: storageErrorBody(error) };
+		}
+		// Allowlist double gate: known name AND own property of the table.
+		if (!STORAGE_OPERATION_NAMES.includes(name as StorageOperationName) || !Object.hasOwn(STORAGE_OPERATIONS, name))
+			return { status: 404, body: storageErrorBody(new Error(`Unknown operation: ${name}`)) };
+		try {
+			const session = await this.source.session(token);
+			const result = await STORAGE_OPERATIONS[name as StorageOperationName](session, args);
+			// Serialize before reporting success; an unencodable result is a single 500,
+			// never a half-written 200 followed by a second header write.
+			try {
+				const payload = JSON.stringify({ ok: true, result: result === undefined ? null : result });
+				return { status: 200, body: payload };
+			} catch {
+				return {
+					status: 500,
+					body: storageErrorBody(new Error(`Operation result cannot be encoded: ${name}`)),
+				};
+			}
+		} catch (error) {
+			return { status: storageErrorStatus(error), body: storageErrorBody(error) };
+		}
 	}
 }
 

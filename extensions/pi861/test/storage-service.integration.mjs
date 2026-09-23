@@ -320,6 +320,14 @@ test("storage service: identity, scopes, budgets, leases, withdrawal and the HTT
 		const third = await session.acquireLease(purpose, "worker-3", 60_000);
 		assert.equal(third.generation, 3);
 		assert.equal(await session.leaseValidAt(purpose, second.generation), false);
+		// review-1 F2 regression: fencing must read the database clock in the same
+		// transaction; a lagging client clock made freshly acquired leases fail the
+		// immediate validation during the clock-skew window.
+		for (let attempt = 0; attempt < 8; attempt++) {
+			const racedPurpose = `race-${suffix}-${attempt}`;
+			const raced = await session.acquireLease(racedPurpose, "fencer", 60_000);
+			assert.equal(await session.leaseValidAt(racedPurpose, raced.generation), true);
+		}
 	});
 
 	await t.test("runtime and identity roles are separated accounts with separated grants", async () => {
@@ -406,8 +414,9 @@ test("storage service: identity, scopes, budgets, leases, withdrawal and the HTT
 					body: JSON.stringify(body),
 				});
 			const put = await call(workerToken, { op: "put", args: write("http-put", { id: "http-item" }) });
-			assert.equal(put.status, 200);
-			const { ok, result } = await put.json();
+			const putBody = await put.text();
+			assert.equal(put.status, 200, putBody);
+			const { ok, result } = JSON.parse(putBody);
 			assert.equal(ok, true);
 			assert.equal(result.revision, 1);
 			const replay = await (await call(workerToken, { op: "put", args: write("http-put", { id: "http-item" }) })).json();
@@ -423,6 +432,16 @@ test("storage service: identity, scopes, budgets, leases, withdrawal and the HTT
 				await call(workerToken, { op: "get", args: { scope: "project:p1", id: "http-item" } })
 			).json();
 			assert.equal(recovered.result.full, "alpha original evidence");
+			// review-1 F1 regression: prototype keys must never resolve to an operation
+			// (Object.prototype.constructor used to bypass the allowlist and crash the
+			// process through a second writeHead); the service must stay alive.
+			for (const op of ["constructor", "__proto__", "valueOf"]) {
+				const poisoned = await call(workerToken, { op });
+				assert.ok(poisoned.status === 400 || poisoned.status === 404, `${op} must be rejected`);
+				assert.equal((await poisoned.json()).ok, false);
+			}
+			const stillAlive = await call(workerToken, { op: "get", args: { scope: "project:p1", id: "http-item" } });
+			assert.equal(stillAlive.status, 200);
 		} finally {
 			child.kill("SIGTERM");
 			await new Promise((resolve) => child.on("exit", resolve));
