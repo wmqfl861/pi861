@@ -21,6 +21,9 @@ test("owned process tree closes before its workspace can be reused and preserves
 		await assert.rejects(pending, /cancelled/);
 		await child.close();
 		await child.close();
+		// Negative: a closed process rejects new requests and raw sends instead of silently reviving.
+		await assert.rejects(child.request({ id: "after-close", method: "identify" }, AbortSignal.timeout(1000)), /closed/i);
+		assert.throws(() => child.send({ type: "after-close" }), /closed/i);
 		assert.throws(() => process.kill(pids.parent, 0), { code: "ESRCH" });
 		assert.throws(() => process.kill(pids.descendant, 0), { code: "ESRCH" });
 	} finally {

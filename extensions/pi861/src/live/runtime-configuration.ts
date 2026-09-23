@@ -3,13 +3,33 @@ import { isAbsolute } from "node:path";
 import type { Role } from "../capabilities.ts";
 import { ModelRecovery } from "../routing.ts";
 import { record } from "../search.ts";
-import type { WebReadLimits } from "../web-read.ts";
 import type { WorkerIdentity } from "./coordinator.ts";
 import type { McpServer } from "./mcp.ts";
 import type { ModelPolicy } from "./model-runtime.ts";
 import type { ResourceRule } from "./skills-host.ts";
-import type { WebAuthorization } from "./web-host.ts";
 import type { CheckCommand } from "./workspace.ts";
+
+/**
+ * Structural port of P2-E's WebReadLimits (src/web-read.ts) until the web module lands on this
+ * baseline. Fields are identical to the staged web-read.ts shape, so the swap to the real import
+ * is a no-op; keeping a copy here lets the S-owned runtime configuration type-check standalone.
+ */
+export interface RuntimeWebReadLimits {
+	maxBytes: number;
+	maxRawBytes: number;
+	timeoutMs: number;
+	idleTimeoutMs: number;
+	maxRedirects: number;
+	inlineLimit: number;
+}
+
+/** Structural port of P2-E's WebAuthorization (src/live/web-host.ts: WebIdentity plus request kind). */
+export interface RuntimeWebAuthorization {
+	owner: string;
+	scope: string;
+	kind: "search" | "web-read" | "result";
+	url?: string;
+}
 
 export interface RuntimeWebConfig {
 	search?: {
@@ -19,7 +39,7 @@ export interface RuntimeWebConfig {
 		maxResponseBytes?: number;
 		timeoutMs?: number;
 	};
-	read?: { enabled: boolean; allowedHosts: string[]; limits?: Partial<WebReadLimits>; allowLoopbackHttp?: boolean };
+	read?: { enabled: boolean; allowedHosts: string[]; limits?: Partial<RuntimeWebReadLimits>; allowLoopbackHttp?: boolean };
 	roleIds: string[];
 	maxRequests: number;
 	allowWorkerWeb?: boolean;
@@ -331,7 +351,7 @@ export function validateRuntimeConfig(input: unknown): RuntimeConfig {
 }
 
 /** Hot-read permission check; result pages retain the same URL and principal policy. */
-export function authorizeRuntimeWeb(config: RuntimeConfig, roleId: string, request: WebAuthorization): boolean {
+export function authorizeRuntimeWeb(config: RuntimeConfig, roleId: string, request: RuntimeWebAuthorization): boolean {
 	const web = config.web;
 	if (!web || !web.roleIds.includes(roleId) || !request.url) return false;
 	const scope = `project:${config.projectId}`;
