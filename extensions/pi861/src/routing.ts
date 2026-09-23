@@ -47,28 +47,46 @@ interface Health {
 export type FailureKind = "transient" | "rate-limit" | "auth" | "quota" | "invalid" | "context" | "cancelled";
 
 function validateRequirements(requirements: Requirements): void {
-	if (!Number.isFinite(requirements.minQuality) || requirements.minQuality < 0 ||
-		!Number.isSafeInteger(requirements.contextTokens) || requirements.contextTokens < 0 ||
-		requirements.allowedIds.length === 0) throw new Error("Invalid model requirements");
+	if (
+		!Number.isFinite(requirements.minQuality) ||
+		requirements.minQuality < 0 ||
+		!Number.isSafeInteger(requirements.contextTokens) ||
+		requirements.contextTokens < 0 ||
+		requirements.allowedIds.length === 0
+	)
+		throw new Error("Invalid model requirements");
 }
 function validateOptions(options: RecoveryOptions): void {
-	if (typeof options.failoverEnabled !== "boolean" || typeof options.failbackEnabled !== "boolean" ||
-		!Number.isSafeInteger(options.probeIntervalMs) || options.probeIntervalMs <= 0 ||
-		!Number.isSafeInteger(options.maxProbeIntervalMs) || options.maxProbeIntervalMs < options.probeIntervalMs ||
-		!Number.isSafeInteger(options.requiredProbeSuccesses) || options.requiredProbeSuccesses < 1) {
+	if (
+		typeof options.failoverEnabled !== "boolean" ||
+		typeof options.failbackEnabled !== "boolean" ||
+		!Number.isSafeInteger(options.probeIntervalMs) ||
+		options.probeIntervalMs <= 0 ||
+		!Number.isSafeInteger(options.maxProbeIntervalMs) ||
+		options.maxProbeIntervalMs < options.probeIntervalMs ||
+		!Number.isSafeInteger(options.requiredProbeSuccesses) ||
+		options.requiredProbeSuccesses < 1
+	) {
 		throw new Error("Invalid recovery options");
 	}
 }
 export function eligible(target: ModelTarget, requirements: Requirements): boolean {
-	return target.enabled && requirements.allowedIds.includes(target.id) &&
-		target.quality >= requirements.minQuality && target.contextWindow >= requirements.contextTokens &&
-		requirements.capabilities.every((capability) => target.capabilities.includes(capability));
+	return (
+		target.enabled &&
+		requirements.allowedIds.includes(target.id) &&
+		target.quality >= requirements.minQuality &&
+		target.contextWindow >= requirements.contextTokens &&
+		requirements.capabilities.every((capability) => target.capabilities.includes(capability))
+	);
 }
 export function selectInitial(
-	targets: readonly ModelTarget[], requirements: Requirements, assessment: Assessment,
+	targets: readonly ModelTarget[],
+	requirements: Requirements,
+	assessment: Assessment,
 ): { mode: ExecutionMode; configId: string } {
 	validateRequirements(requirements);
-	const candidates = targets.filter((target) => eligible(target, requirements))
+	const candidates = targets
+		.filter((target) => eligible(target, requirements))
 		.sort((a, b) => a.costRank - b.costRank || a.id.localeCompare(b.id));
 	const target = candidates[0];
 	if (!target) throw new Error("No authorized model satisfies the task");
@@ -96,10 +114,19 @@ export class ModelRecovery {
 		validateOptions(options);
 		this.targets = new Map();
 		for (const target of targets) {
-			if (!target.id || !target.revision || !target.provider || !target.model ||
-				this.targets.has(target.id) || !Number.isFinite(target.quality) || target.quality < 0 ||
-				!Number.isFinite(target.costRank) || target.costRank < 0 ||
-				!Number.isSafeInteger(target.contextWindow) || target.contextWindow <= 0) {
+			if (
+				!target.id ||
+				!target.revision ||
+				!target.provider ||
+				!target.model ||
+				this.targets.has(target.id) ||
+				!Number.isFinite(target.quality) ||
+				target.quality < 0 ||
+				!Number.isFinite(target.costRank) ||
+				target.costRank < 0 ||
+				!Number.isSafeInteger(target.contextWindow) ||
+				target.contextWindow <= 0
+			) {
 				throw new Error("Invalid or duplicate model configuration");
 			}
 			this.targets.set(target.id, structuredClone(target));
@@ -116,30 +143,85 @@ export class ModelRecovery {
 		if (!target || !eligible(target, this.requirements)) throw new Error("Ineligible model configuration");
 		return target;
 	}
-	get current(): ModelTarget { return structuredClone(this.requireEligible(this.active)); }
+	get current(): ModelTarget {
+		return structuredClone(this.requireEligible(this.active));
+	}
 	get state() {
 		return {
-			preferred: this.preferred, active: this.active, generation: this.generation,
-			inFlight: this.attempt !== undefined, options: { ...this.options },
+			preferred: this.preferred,
+			active: this.active,
+			generation: this.generation,
+			inFlight: this.attempt !== undefined,
+			options: { ...this.options },
 			health: [...this.health.entries()].map(([id, health]) => ({ id, ...health })),
 		};
 	}
-	exportState(): { version: 1; preferred: string; active: string; generation: number; options: RecoveryOptions; health: { id: string; revision: string; failures: number; successes: number; nextProbeAt: number; ready: boolean }[] } {
-		return { version: 1, preferred: this.preferred, active: this.active, generation: this.generation, options: { ...this.options },
-			health: [...this.health].map(([id, health]) => ({ id, revision: this.targets.get(id)?.revision ?? "", ...health })) };
+	exportState(): {
+		version: 1;
+		preferred: string;
+		active: string;
+		generation: number;
+		options: RecoveryOptions;
+		health: {
+			id: string;
+			revision: string;
+			failures: number;
+			successes: number;
+			nextProbeAt: number;
+			ready: boolean;
+		}[];
+	} {
+		return {
+			version: 1,
+			preferred: this.preferred,
+			active: this.active,
+			generation: this.generation,
+			options: { ...this.options },
+			health: [...this.health].map(([id, health]) => ({
+				id,
+				revision: this.targets.get(id)?.revision ?? "",
+				...health,
+			})),
+		};
 	}
 	restore(snapshot: ReturnType<ModelRecovery["exportState"]>): void {
-		if (this.attempt || snapshot.version !== 1 || !Number.isSafeInteger(snapshot.generation) || snapshot.generation < 0) throw new Error("Invalid recovery checkpoint");
-		validateOptions(snapshot.options); this.requireEligible(snapshot.preferred); this.requireEligible(snapshot.active);
+		if (
+			this.attempt ||
+			snapshot.version !== 1 ||
+			!Number.isSafeInteger(snapshot.generation) ||
+			snapshot.generation < 0
+		)
+			throw new Error("Invalid recovery checkpoint");
+		validateOptions(snapshot.options);
+		this.requireEligible(snapshot.preferred);
+		this.requireEligible(snapshot.active);
 		const health = new Map<string, Health>();
 		for (const entry of snapshot.health) {
-			if (health.has(entry.id) || this.targets.get(entry.id)?.revision !== entry.revision || !Number.isSafeInteger(entry.failures) || entry.failures < 1 ||
-				!Number.isSafeInteger(entry.successes) || entry.successes < 0 || !Number.isFinite(entry.nextProbeAt) || typeof entry.ready !== "boolean") throw new Error("Invalid recovery health checkpoint");
-			health.set(entry.id, { failures: entry.failures, successes: entry.successes, nextProbeAt: entry.nextProbeAt, ready: entry.ready });
+			if (
+				health.has(entry.id) ||
+				this.targets.get(entry.id)?.revision !== entry.revision ||
+				!Number.isSafeInteger(entry.failures) ||
+				entry.failures < 1 ||
+				!Number.isSafeInteger(entry.successes) ||
+				entry.successes < 0 ||
+				!Number.isFinite(entry.nextProbeAt) ||
+				typeof entry.ready !== "boolean"
+			)
+				throw new Error("Invalid recovery health checkpoint");
+			health.set(entry.id, {
+				failures: entry.failures,
+				successes: entry.successes,
+				nextProbeAt: entry.nextProbeAt,
+				ready: entry.ready,
+			});
 		}
-		this.health.clear(); for (const [id, value] of health) this.health.set(id, value);
-		this.preferred = snapshot.preferred; this.active = snapshot.active; this.options = { ...snapshot.options };
-		this.generation = snapshot.generation + 1; this.probe = undefined; // Never restore an old request's execution authority.
+		this.health.clear();
+		for (const [id, value] of health) this.health.set(id, value);
+		this.preferred = snapshot.preferred;
+		this.active = snapshot.active;
+		this.options = { ...snapshot.options };
+		this.generation = snapshot.generation + 1;
+		this.probe = undefined; // Never restore an old request's execution authority.
 	}
 
 	setOptions(patch: Partial<RecoveryOptions>): void {
@@ -168,8 +250,11 @@ export class ModelRecovery {
 		return { ...attempt };
 	}
 	private owns(attempt: Attempt): boolean {
-		return this.attempt?.generation === attempt.generation &&
-			this.attempt.configId === attempt.configId && this.attempt.configRevision === attempt.configRevision;
+		return (
+			this.attempt?.generation === attempt.generation &&
+			this.attempt.configId === attempt.configId &&
+			this.attempt.configRevision === attempt.configRevision
+		);
 	}
 	succeed(attempt: Attempt): boolean {
 		if (!this.owns(attempt)) return false;
@@ -190,16 +275,23 @@ export class ModelRecovery {
 		if (kind === "cancelled" || kind === "invalid" || kind === "context") return false;
 		const previous = this.health.get(attempt.configId);
 		const failures = (previous?.failures ?? 0) + 1;
-		const delay = Math.min(this.options.maxProbeIntervalMs,
-			this.options.probeIntervalMs * 2 ** Math.min(failures - 1, 20));
+		const delay = Math.min(
+			this.options.maxProbeIntervalMs,
+			this.options.probeIntervalMs * 2 ** Math.min(failures - 1, 20),
+		);
 		this.health.set(attempt.configId, {
-			failures, successes: 0, ready: false,
+			failures,
+			successes: 0,
+			ready: false,
 			nextProbeAt: now + Math.max(delay, Number.isFinite(retryAfterMs) ? Math.max(0, retryAfterMs) : 0),
 		});
 		if (!this.options.failoverEnabled) return false;
-		const next = [...this.targets.values()].find((target) =>
-			target.id !== attempt.configId && eligible(target, this.requirements) &&
-			(!this.health.has(target.id) || this.health.get(target.id)?.ready));
+		const next = [...this.targets.values()].find(
+			(target) =>
+				target.id !== attempt.configId &&
+				eligible(target, this.requirements) &&
+				(!this.health.has(target.id) || this.health.get(target.id)?.ready),
+		);
 		if (!next) return false;
 		this.active = next.id;
 		return true;
@@ -210,29 +302,47 @@ export class ModelRecovery {
 		if (!health || health.ready || now < health.nextProbeAt) return undefined;
 		const target = this.requireEligible(this.preferred);
 		this.probe = {
-			probeId: ++this.probeSequence, generation: this.generation,
-			configId: target.id, configRevision: target.revision,
+			probeId: ++this.probeSequence,
+			generation: this.generation,
+			configId: target.id,
+			configRevision: target.revision,
 		};
 		return { ...this.probe };
 	}
 	finishProbe(probe: Probe, successful: boolean, now: number): boolean {
-		if (!this.options.failbackEnabled || this.probe?.probeId !== probe.probeId ||
-			probe.configId !== this.preferred || this.probe.configRevision !== probe.configRevision) return false;
+		if (
+			!this.options.failbackEnabled ||
+			this.probe?.probeId !== probe.probeId ||
+			probe.configId !== this.preferred ||
+			this.probe.configRevision !== probe.configRevision
+		)
+			return false;
 		this.probe = undefined;
 		const health = this.health.get(probe.configId);
 		if (!health) return false;
 		health.successes = successful ? health.successes + 1 : 0;
 		if (!successful) health.failures++;
 		health.ready = health.successes >= this.options.requiredProbeSuccesses;
-		health.nextProbeAt = now + (successful ? this.options.probeIntervalMs :
-			Math.min(this.options.maxProbeIntervalMs,
-				this.options.probeIntervalMs * 2 ** Math.min(health.failures - 1, 20)));
+		health.nextProbeAt =
+			now +
+			(successful
+				? this.options.probeIntervalMs
+				: Math.min(
+						this.options.maxProbeIntervalMs,
+						this.options.probeIntervalMs * 2 ** Math.min(health.failures - 1, 20),
+					));
 		return true;
 	}
 	/** Called before a NEW model request, after outstanding tool results are settled. */
 	atBoundary(pendingOperations = 0): boolean {
-		if (!this.options.failbackEnabled || this.attempt || pendingOperations > 0 ||
-			this.active === this.preferred || !this.health.get(this.preferred)?.ready) return false;
+		if (
+			!this.options.failbackEnabled ||
+			this.attempt ||
+			pendingOperations > 0 ||
+			this.active === this.preferred ||
+			!this.health.get(this.preferred)?.ready
+		)
+			return false;
 		this.requireEligible(this.preferred);
 		this.active = this.preferred;
 		this.probe = undefined;
@@ -260,8 +370,13 @@ export async function inferWithRecovery<T>(
 	call: (target: ModelTarget, attempt: Attempt, signal: AbortSignal) => Promise<T>,
 	options: { signal: AbortSignal; maxAttempts: number; timeoutMs: number; now?: () => number },
 ): Promise<T> {
-	if (!Number.isSafeInteger(options.maxAttempts) || options.maxAttempts < 1 ||
-		!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs <= 0) throw new Error("Invalid attempt limits");
+	if (
+		!Number.isSafeInteger(options.maxAttempts) ||
+		options.maxAttempts < 1 ||
+		!Number.isSafeInteger(options.timeoutMs) ||
+		options.timeoutMs <= 0
+	)
+		throw new Error("Invalid attempt limits");
 	const now = options.now ?? Date.now;
 	for (let index = 0; index < options.maxAttempts; index++) {
 		options.signal.throwIfAborted();
