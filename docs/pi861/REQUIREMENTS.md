@@ -220,7 +220,7 @@
 | P0-H | `p0-host`（H，宿主） | G6；R8.4 | P0-A |
 | P0-T | `p0-toolchain`（T，检查链/根配置） | G6；R3.13 | P0-A |
 | P1-C | `p1-contracts`（C，共享契约） | G1、G2、G3、G8；R1.7、R3.4、R5.1、R6.18 | P0-A |
-| P1-S | `p1-services`（S，共享服务） | R1.2、R1.8、R2.7、R3.5、R4.6、R6.18 | P1-C 冻结 |
+| P1-S | `p1-services`（S，共享服务） | R1.2、R1.8、R2.7、R3.5、R4.6、R6.18、R8.6 | P1-C 冻结 |
 | P1-Q | `p1-fixtures`（Q，fixture/验收运行器） | G7；R4.9、R5.6、R8.8 | P0-A、C7 冻结 |
 | P1-L | `p1-ledger`（L，台账/登记） | —（本节与 ACCEPTANCE_MATRIX 第 0 节、DISPATCH_REGISTRY 的登记本身） | 无产品接口依赖（交付依赖 P0-A 事实清单） |
 | P2-A | `p2-model`（A，模型策略/预算/健康） | R1.1–R1.9（全部九条）；R2.1、R2.2、R2.3、R2.5、R2.6、R2.8、R2.9；R3.6；R8.3；AX3 | P1-C、P1-S 接口 |
