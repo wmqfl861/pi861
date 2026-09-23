@@ -8,9 +8,17 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-const cli = process.env.PI861_TEST_PI_CLI;
+const sourceHost = process.env.PI861_TEST_SOURCE_HOST === "1";
+const cli = sourceHost ? fileURLToPath(new URL("../../../packages/coding-agent/src/experimental/cli.ts", import.meta.url)) : process.env.PI861_TEST_PI_CLI;
+if (process.env.PI861_REQUIRE_HOST_TESTS === "1" && !cli) {
+	throw new Error("PI861_TEST_PI_CLI is required for host acceptance; a skipped host test is not a pass");
+}
 /** Optional JSON string array inserted before the CLI entry, e.g. a tsx source-host launch: ["<tsx>/cli.mjs","--tsconfig","<tsconfig>"]. */
 function launchPrefix() {
+	if (sourceHost) return [
+		fileURLToPath(new URL("../../../node_modules/tsx/dist/cli.mjs", import.meta.url)),
+		"--tsconfig", fileURLToPath(new URL("../../../tsconfig.json", import.meta.url)),
+	];
 	const raw = process.env.PI861_TEST_PI_LAUNCH_PREFIX;
 	if (!raw) return [];
 	const parsed = JSON.parse(raw);

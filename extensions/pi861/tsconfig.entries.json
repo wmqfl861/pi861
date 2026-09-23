@@ -1,14 +1,15 @@
 {
-  "extends": "../../tsconfig.json",
+  "extends": "./tsconfig.host-source.json",
   "compilerOptions": {
-    "target": "ES2024",
-    "lib": ["ES2024"],
-    "typeRoots": ["../../node_modules/@types"]
+    "allowJs": true,
+    "checkJs": true
   },
   "include": [
     "runtime.ts",
     "index.ts",
     "src/**/*.ts",
+    "examples/**/*.mjs",
+    "scripts/**/*.mjs",
     "../../packages/*/src/**/*.d.ts",
     "../../packages/session-backends/*/src/**/*.d.ts"
   ]

@@ -58,6 +58,15 @@ test("extension registers goal and memory but disabled search has no model tool"
 	await h.command("web-search", "test");
 	assert.match(h.notices.at(-1).message, /disabled/);
 });
+test("managed web service owns search registration without disabling memory", async () => {
+	const h = host({ managedSearch: true, search: { enabled: true, apiKey: "fixture" } });
+	await h.emit("session_start");
+	assert.equal(h.commands.has("web-search"), false);
+	assert.equal(h.tools.has("pi861_web_search"), false);
+	assert.equal(h.tools.has("pi861_memory"), true);
+	await h.command("remember", "managed search keeps explicit memory available");
+	assert.equal((await h.tool("pi861_memory", { action: "search", query: "managed search" })).details.length, 1);
+});
 test("goal starts, records progress, and refills after settlement rather than agent_end", async () => {
 	const h = host();
 	await h.emit("session_start");
@@ -201,6 +210,14 @@ test("a second pi861 composition on the same host is refused", async () => {
 	);
 	// The refused install must not have registered a second goal command owner.
 	assert.equal([...h.commands.keys()].filter((name) => name === "goal").length, 1);
+});
+test("duplicate protection survives a second live host and its shutdown", async () => {
+	const first = host();
+	const second = host();
+	assert.throws(() => installPi861(first.pi), /already installed/);
+	await second.emit("session_shutdown");
+	assert.throws(() => installPi861(first.pi), /already installed/);
+	await first.emit("session_shutdown");
 });
 test("a fresh host generation may install after the previous one shut down", async () => {
 	const first = host();
