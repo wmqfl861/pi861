@@ -155,7 +155,9 @@ export function parseAcceptanceConfig(input: unknown): AcceptanceConfig {
 					throw new Error("Invalid check environment");
 				// Real-service opt-ins are set only by the operator running scripts/real-acceptance/*
 				// directly; they can never be armed through acceptance configs or suite manifests.
-				if (/^PI861_REAL_/.test(key))
+				// Case-insensitive: environment-variable lookup on Windows ignores case, so a
+				// lowercase spelling would still reach the child as the real opt-in (review-1 D3r).
+				if (/^PI861_REAL_/i.test(key))
 					throw new Error("Real-service authorization variables cannot be passed through acceptance configuration");
 				env[key] = value;
 			}
@@ -238,7 +240,9 @@ export function parseAcceptanceManifest(input: unknown): AcceptanceManifest {
 		root.environmentNames.some((name: unknown) => typeof name !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name))
 	)
 		throw new Error("Acceptance manifest requires environmentNames to be a list of variable names");
-	if (root.environmentNames.some((name: string) => /^PI861_REAL_/.test(name)))
+	// Case-insensitive for the same reason as check.env keys (review-1 D3r): process.env lookup
+	// on Windows is case-insensitive, so a lowercase name would still pass through the value.
+	if (root.environmentNames.some((name: string) => /^PI861_REAL_/i.test(name)))
 		throw new Error("Real-service authorization variables cannot be passed through suite manifests");
 	const config = parseAcceptanceConfig({
 		workspace: root.workspace,

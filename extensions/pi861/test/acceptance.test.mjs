@@ -104,6 +104,12 @@ test("invalid trusted configuration and wrong commit fail before executing", asy
 		() => parseAcceptanceConfig({ workspace: path, checks: [check("armed", ["-e", "0"], { env: { PI861_REAL_SEARCH_ACCEPTANCE: "1" } })] }),
 		/Real-service authorization variables cannot be passed through acceptance configuration/,
 	);
+	// Review-1 D3r regression (attack A7b): Windows env lookup is case-insensitive, so a
+	// lowercase spelling must be rejected exactly like the uppercase form.
+	assert.throws(
+		() => parseAcceptanceConfig({ workspace: path, checks: [check("armed", ["-e", "0"], { env: { pi861_real_search_acceptance: "1" } })] }),
+		/Real-service authorization variables cannot be passed through acceptance configuration/,
+	);
 	assert.throws(
 		() => parseAcceptanceConfig({ workspace: path, checks: [{ id: "armed", command: "node", args: ["-e", "0"], kind: "structural-check", reporter: "exit", env: { PI861_REAL_MODEL_BUDGET: "3" } }] }),
 		/Real-service/,
@@ -125,6 +131,8 @@ test("acceptance manifest schema rejects missing, unknown and smuggled fields", 
 	assert.throws(() => parseAcceptanceManifest({ ...base, suite: "production" }), /known suite/);
 	assert.throws(() => parseAcceptanceManifest({ ...base, requiredChecks: ["missing-id"] }), /not defined/);
 	assert.throws(() => parseAcceptanceManifest({ ...base, environmentNames: ["PI861_REAL_SEARCH_ACCEPTANCE"] }), /Real-service/);
+	// Review-1 D3r: lowercase passthrough names are rejected too (case-insensitive env lookup).
+	assert.throws(() => parseAcceptanceManifest({ ...base, environmentNames: ["pi861_real_search_acceptance"] }), /Real-service/);
 	assert.throws(
 		() => parseAcceptanceManifest({ ...base, checks: [{ ...base.checks[0], env: { PI861_REAL_SEARCH_BUDGET: "3" } }] }),
 		/Real-service authorization variables cannot be passed through acceptance configuration/,
@@ -250,6 +258,19 @@ test("suite runner refuses missing manifests, suite mismatch and real-service sc
 	// Review-1 D3 regression (attack A7): arming PI861_REAL_* through per-check env is rejected
 	// before any execution; the child process must never observe the values.
 	assert.throws(() => execFileSync(process.execPath, [cli, "--suite", "local", "--manifest", armedManifest, "--evidence", evidencePath], { env: cliEnv, stdio: "pipe" }), (error) => {
+		assert.match(String(error.stderr), /Real-service authorization variables cannot be passed through/);
+		return error.status === 1;
+	});
+	// Review-1 D3r regression (attack A7b): lowercase keys smuggle nothing either.
+	const armedLowerManifest = join(path, "armed-lower.json");
+	writeFileSync(armedLowerManifest, JSON.stringify({
+		version: 1, suite: "local", workspace: path, requiredChecks: ["armed"], environmentNames: [],
+		checks: [{
+			id: "armed", command: process.execPath, args: ["-e", "console.log(process.env.PI861_REAL_SEARCH_ACCEPTANCE ?? 'unset')"],
+			kind: "structural-check", reporter: "exit", env: { pi861_real_search_acceptance: "1", pi861_real_search_budget: "3" },
+		}],
+	}));
+	assert.throws(() => execFileSync(process.execPath, [cli, "--suite", "local", "--manifest", armedLowerManifest, "--evidence", evidencePath], { env: cliEnv, stdio: "pipe" }), (error) => {
 		assert.match(String(error.stderr), /Real-service authorization variables cannot be passed through/);
 		return error.status === 1;
 	});
