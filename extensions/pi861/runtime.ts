@@ -12,9 +12,8 @@ import {
 } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { installPi861, type PiHost } from "./index.ts";
-import type { Role, ToolBinding } from "./src/capabilities.ts";
+import type { Role } from "./src/capabilities.ts";
 import {
-	chooseSkillGroup,
 	type GenerateText,
 	memoryExtractor,
 	projectPlan,
@@ -29,8 +28,8 @@ import { OperationJournal } from "./src/live/operations.ts";
 import { PiRpcSession } from "./src/live/pi-rpc.ts";
 import { ProjectRunner } from "./src/live/project-runner.ts";
 import { RemoteWorkerClient } from "./src/live/remote-worker.ts";
-import { recordSkillAcceptance, runSkillValidation } from "./src/live/skill-validation.ts";
 import { emptySkillState, SkillRepository } from "./src/live/skill-repository.ts";
+import { recordSkillAcceptance, runSkillValidation } from "./src/live/skill-validation.ts";
 import { type CapabilityHost, installCapabilities } from "./src/live/skills-host.ts";
 import { FileStateStore, PostgresStateStore, type StateStore } from "./src/live/store.ts";
 import { guardWorkerTool } from "./src/live/worker-guard.ts";
@@ -617,8 +616,36 @@ export default function runtimeExtension(pi: ExtensionAPI): void {
 					"info",
 				);
 			} else if (action === "publish") {
+				if (!parts[0]) throw new Error("Specify a candidate id");
+				const candidate = await repository.candidate(parts[0]);
+				// Publication evidence follows C7: structural and behavioral checks come
+				// from deterministic trusted checkers, human acceptance only records the
+				// operator's review, and one class never substitutes for another. Trusted
+				// behavioral cases are not yet wired into host configuration, so publish
+				// fails honestly instead of fabricating evidence.
+				const owner = {
+					producedBy: {
+						tenantId,
+						projectId: config.projectId,
+						goalId: "manual",
+						runId: "host",
+						taskId: "skill-publish",
+						attempt: 1,
+					},
+					scope,
+					recordedBy: config.agentId ?? "main",
+				};
+				const validation = await runSkillValidation(
+					candidate.skill,
+					{
+						...owner,
+						approvedBindings: candidate.approvedBindings,
+						environment: config.environment ?? [],
+						cases: [],
+					},
+					wakeController.signal,
+				);
 				if (
-					!parts[0] ||
 					!ctx.hasUI ||
 					!(await ctx.ui.confirm(
 						"Publish Skill candidate",
@@ -626,9 +653,14 @@ export default function runtimeExtension(pi: ExtensionAPI): void {
 					))
 				)
 					return;
-				await repository.publish(parts[0], async () => ({
-					passed: true,
-					evidence: [`user-reviewed:${Date.now()}`],
+				await repository.publish(parts[0], async (skill) => ({
+					evidence: [
+						...validation.evidence,
+						recordSkillAcceptance(skill, {
+							...owner,
+							summary: "Operator reviewed applicability, constraints and tool bindings",
+						}),
+					],
 				}));
 				ctx.ui.notify("Published reviewed runtime Skill", "info");
 			} else if (action === "rollback") {

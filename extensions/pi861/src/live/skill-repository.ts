@@ -152,7 +152,7 @@ export class SkillRepository {
 	async install(
 		directory: string,
 		metadata: { id: string; revision: string; group?: string },
-		signal = new AbortController().signal,
+		signal: AbortSignal = new AbortController().signal,
 	): Promise<SkillSource> {
 		if (
 			![metadata.id, metadata.revision, ...(metadata.group === undefined ? [] : [metadata.group])].every(

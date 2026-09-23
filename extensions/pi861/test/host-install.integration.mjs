@@ -44,3 +44,27 @@ test("real host adapter validates tool gates and context results", async () => {
 	port.on("tool_call", () => ({ block: "yes" }));
 	await assert.rejects(extension.handlers.get("tool_call")[1]({}, {}), /Invalid Pi861 tool gate/);
 });
+
+test("basic and full runtime compositions are mutually exclusive on one host", async () => {
+	const bus = createEventBus(), runtime = createExtensionRuntime();
+	const basic = await loadExtensionFromFactory((pi) => {
+		installPi861(pi, { search: { enabled: false } });
+	}, cwd, bus, runtime, "<pi861-basic>");
+	assert.ok(basic.commands.has("goal"));
+	assert.ok(basic.commands.has("web-search"));
+	// The full runtime entry composes through the same install claim via the
+	// host adapter; a second composition must be refused instead of registering
+	// a second goal owner, model controller or memory collector.
+	await assert.rejects(
+		loadExtensionFromFactory((pi) => {
+			installPi861(hostPort(pi), { managedGoal: true, managedSearch: true });
+		}, cwd, bus, runtime, "<pi861-full-duplicate>"),
+		/already installed/,
+	);
+	const full = await loadExtensionFromFactory((pi) => {
+		installPi861(hostPort(pi), { managedGoal: true, managedSearch: true });
+	}, cwd, createEventBus(), createExtensionRuntime(), "<pi861-full-alone>");
+	assert.equal(full.commands.has("goal"), false, "managed goal defers to the full runtime entry");
+	assert.equal(full.commands.has("web-search"), false, "managed search defers to the installed web service");
+	assert.ok(full.tools.has("pi861_memory"));
+});

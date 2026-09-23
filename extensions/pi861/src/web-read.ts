@@ -661,9 +661,13 @@ export async function webRead(
 					"content_type_forbidden",
 				);
 			const charset = declaredCharset ?? "utf-8";
-			let decoder: TextDecoder;
+			// The ambient TextDecoder type differs across host type environments
+			// (auto-loaded types vs types:["node"]); the local factory keeps the
+			// decoder fully inferred without naming the global in type position.
+			const newDecoder = () => new TextDecoder(charset, { fatal: true });
+			let decoder: ReturnType<typeof newDecoder>;
 			try {
-				decoder = new TextDecoder(charset, { fatal: true });
+				decoder = newDecoder();
 			} catch {
 				throw new WebReadFailure(`Undecodable charset: ${charset}`, "charset_unsupported");
 			}
