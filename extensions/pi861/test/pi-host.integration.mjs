@@ -139,7 +139,7 @@ test("real Pi: load extension, commands and memory without an LLM", { skip: !cli
 			killTimer = setTimeout(() => { if (!closed) child.kill("SIGKILL"); resolve(); }, 3000);
 		})]);
 		clearTimeout(killTimer);
-		await rm(directory, { recursive: true, force: true });
+		await removeTree(directory);
 	}
 });
 
