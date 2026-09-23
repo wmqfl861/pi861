@@ -2,11 +2,12 @@ name: Pi861 runtime
 
 on:
   push:
-    branches: [feat/pi861-runtime-v1]
-    paths: ['extensions/pi861/**', '.github/workflows/pi861-runtime.yml']
+    branches: [feat/pi861-runtime-v1, 'pi861/**', 'feat/pi861-runtime-v1-cont-20260923-*']
+    paths: ['extensions/pi861/**', '.github/workflows/pi861-runtime.yml', 'package.json', 'package-lock.json', 'tsconfig*.json', 'biome.json', 'scripts/check-*.mjs', 'scripts/pi861-production-entries.json', 'packages/ai/**', 'packages/coding-agent/src/**']
   pull_request:
-    branches: [main]
-    paths: ['extensions/pi861/**', '.github/workflows/pi861-runtime.yml']
+    branches: [main, feat/pi861-runtime-v1]
+    paths: ['extensions/pi861/**', '.github/workflows/pi861-runtime.yml', 'package.json', 'package-lock.json', 'tsconfig*.json', 'biome.json', 'scripts/check-*.mjs', 'scripts/pi861-production-entries.json', 'packages/ai/**', 'packages/coding-agent/src/**']
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -14,6 +15,10 @@ permissions:
 concurrency:
   group: pi861-runtime-${{ github.ref }}
   cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
   deterministic:
@@ -24,14 +29,22 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: '22'
-      - name: Install isolated test compiler
-        run: npm install --prefix "$RUNNER_TEMP/pi861-tools" --no-save --no-package-lock --ignore-scripts typescript@5.9.3 @types/node@22.19.19
+      - run: mkdir -p .artifacts/pi861
+      - name: Install locked test dependencies
+        run: npm ci --ignore-scripts 2>&1 | tee .artifacts/pi861/install.log
       - name: Type check extension
         working-directory: extensions/pi861
-        run: node "$RUNNER_TEMP/pi861-tools/node_modules/typescript/bin/tsc" --noEmit --typeRoots "$RUNNER_TEMP/pi861-tools/node_modules/@types"
+        run: node ../../node_modules/typescript/bin/tsc --noEmit --project tsconfig.json 2>&1 | tee ../../.artifacts/pi861/core-types.log
       - name: Deterministic tests without model or MCP credentials
         working-directory: extensions/pi861
-        run: node --experimental-strip-types --test test/*.test.mjs
+        run: node --experimental-strip-types --test test/*.test.mjs 2>&1 | tee ../../.artifacts/pi861/deterministic.log
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: pi861-deterministic-${{ github.sha }}
+          path: .artifacts/pi861/*.log
+          if-no-files-found: error
+          retention-days: 14
 
   postgres:
     runs-on: ubuntu-latest
@@ -52,15 +65,23 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: '22'
+      - run: mkdir -p .artifacts/pi861
       - name: Install isolated PostgreSQL test driver
-        run: npm install --prefix "$RUNNER_TEMP/pi861-driver" --no-save --no-package-lock --ignore-scripts pg@8.16.3
+        run: npm install --prefix "$RUNNER_TEMP/pi861-driver" --no-save --no-package-lock --ignore-scripts pg@8.16.3 2>&1 | tee .artifacts/pi861/postgres-install.log
       - name: Integration against disposable local PostgreSQL
         working-directory: extensions/pi861
         env:
           PI861_ALLOW_TEST_DATABASE: '1'
           PI861_TEST_POSTGRES_URL: postgresql://postgres:test-only@127.0.0.1:5432/pi861_test
           PI861_TEST_DRIVER_ROOT: ${{ runner.temp }}/pi861-driver
-        run: node --experimental-strip-types --test test/postgres.integration.mjs
+        run: node --experimental-strip-types --test test/postgres.integration.mjs 2>&1 | tee ../../.artifacts/pi861/postgres.log
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: pi861-postgres17-${{ github.sha }}
+          path: .artifacts/pi861/*.log
+          if-no-files-found: error
+          retention-days: 14
 
   repository-check:
     runs-on: ubuntu-latest
@@ -70,35 +91,88 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: '22'
-      - run: npm ci --ignore-scripts
+      - run: mkdir -p .artifacts/pi861
+      - run: npm ci --ignore-scripts 2>&1 | tee .artifacts/pi861/install.log
       - name: Generate provider catalog types required by the repository check
-        run: npm --prefix packages/ai run generate-models
-      - run: npm run check
+        run: npm --prefix packages/ai run generate-models 2>&1 | tee .artifacts/pi861/model-catalog.log
+      - name: Full repository check including extension production entries
+        run: npm run check 2>&1 | tee .artifacts/pi861/repository-check.log
+      - name: Reject automatic source fixes left by the check
+        run: git diff --exit-code -- . ':!packages/ai/src/models.generated.ts'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: pi861-repository-check-${{ github.sha }}
+          path: .artifacts/pi861/*.log
+          if-no-files-found: error
+          retention-days: 14
 
   pi-host:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    name: Pi host (${{ matrix.host }}, ${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        host: [published, source]
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      PI861_REQUIRE_HOST_TESTS: '1'
+      PI861_TEST_TIMEOUT_MS: '180000'
+      PI861_TEST_PI_RPC_TIMEOUT_MS: '60000'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: '22'
+      - run: mkdir -p .artifacts/pi861
+      - name: Install source host dependencies
+        if: matrix.host == 'source'
+        run: npm ci --ignore-scripts 2>&1 | tee .artifacts/pi861/source-install.log
+      - name: Generate source host model catalog
+        if: matrix.host == 'source'
+        run: npm --prefix packages/ai run generate-models 2>&1 | tee .artifacts/pi861/source-catalog.log
       - name: Install isolated published Pi host
-        run: npm install --prefix "$RUNNER_TEMP/pi861-host" --no-save --no-package-lock --ignore-scripts @earendil-works/pi-coding-agent@0.86.1 typescript@5.9.3 @types/node@22.19.19
+        if: matrix.host == 'published'
+        run: npm install --prefix extensions/pi861 --no-save --no-package-lock --ignore-scripts @earendil-works/pi-coding-agent@0.86.1 typescript@5.9.3 @types/node@22.19.19 2>&1 | tee .artifacts/pi861/published-install.log
       - name: Archive dependency-only test host
-        run: tar -czf "$RUNNER_TEMP/pi861-host.tgz" -C "$RUNNER_TEMP/pi861-host" node_modules
+        if: matrix.host == 'published'
+        run: tar -czf "$RUNNER_TEMP/pi861-host.tgz" -C extensions/pi861 node_modules
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: matrix.host == 'published'
         with:
-          name: pi861-isolated-host
+          name: pi861-isolated-host-${{ matrix.os }}
           path: ${{ runner.temp }}/pi861-host.tgz
           retention-days: 1
-      - name: Check native runtime against actual Pi types
+      - name: Check native runtime against actual published Pi types
+        if: matrix.host == 'published'
         working-directory: extensions/pi861
-        run: |
-          ln -s "$RUNNER_TEMP/pi861-host/node_modules" node_modules
-          node "$RUNNER_TEMP/pi861-host/node_modules/typescript/bin/tsc" --project tsconfig.host.json --typeRoots "$RUNNER_TEMP/pi861-host/node_modules/@types"
-      - name: Real Pi RPC and native runtime with deterministic local provider
+        run: node node_modules/typescript/bin/tsc --project tsconfig.host.json --typeRoots node_modules/@types 2>&1 | tee ../../.artifacts/pi861/published-types.log
+      - name: Check runtime against current source host types
+        if: matrix.host == 'source'
+        run: node node_modules/typescript/bin/tsc --project extensions/pi861/tsconfig.host-source.json 2>&1 | tee .artifacts/pi861/source-types.log
+      - name: Actual published host with deterministic local provider
+        if: matrix.host == 'published'
         working-directory: extensions/pi861
         env:
-          PI861_TEST_PI_CLI: ${{ runner.temp }}/pi861-host/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js
-        run: node --experimental-strip-types --test test/pi-host.integration.mjs test/runtime-host.integration.mjs
+          PI861_TEST_PI_CLI: ${{ github.workspace }}/extensions/pi861/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js
+        run: node --experimental-strip-types --test test/pi-host.integration.mjs test/runtime-host.integration.mjs 2>&1 | tee ../../.artifacts/pi861/published-host.log
+      - name: Check all production TypeScript and JavaScript entries
+        if: matrix.host == 'source'
+        run: node node_modules/typescript/bin/tsc --project extensions/pi861/tsconfig.entries.json 2>&1 | tee .artifacts/pi861/production-entry-types.log
+      - name: Verify duplicate-install protection against actual source ExtensionAPI facades
+        if: matrix.host == 'source'
+        run: node node_modules/tsx/dist/cli.mjs --tsconfig tsconfig.json --test extensions/pi861/test/host-install.integration.mjs 2>&1 | tee .artifacts/pi861/source-install-guard.log
+      - name: Actual source host with deterministic local provider
+        if: matrix.host == 'source'
+        working-directory: extensions/pi861
+        env:
+          PI861_TEST_SOURCE_HOST: '1'
+        run: node --experimental-strip-types --test test/pi-host.integration.mjs test/runtime-host.integration.mjs 2>&1 | tee ../../.artifacts/pi861/source-host.log
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: pi861-host-${{ matrix.host }}-${{ matrix.os }}-${{ github.sha }}
+          path: .artifacts/pi861/*.log
+          if-no-files-found: error
+          retention-days: 14

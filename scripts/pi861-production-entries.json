@@ -1,0 +1,122 @@
+{
+	"version": 1,
+	"owner": "P0-T (toolchain). Check coverage is owned by P0-T; each entry's file CONTENT belongs to the module owner listed on the entry.",
+	"enforcedBy": "node scripts/check-pi861-entries.mjs (wired into npm run check as check:pi861-entries)",
+	"purpose": "Every production entry of extensions/pi861 must be covered by lint (root biome.json), type checking (extension tsconfigs + root tsconfig), and an actual startup path (CI job or documented operator command). Removing an entry's coverage from any config must fail npm run check.",
+	"entries": [
+		{
+			"path": "extensions/pi861/runtime.ts",
+			"kind": "pi-extension-entry",
+			"language": "ts",
+			"declaredIn": "extensions/pi861/package.json#pi.extensions",
+			"contentOwner": "P0-H / P3-I",
+			"lint": "root biome.json extensions/pi861/**/*.ts",
+			"type": [
+				"extensions/pi861/tsconfig.json",
+				"extensions/pi861/tsconfig.entries.json",
+				"extensions/pi861/tsconfig.host.json (published Pi host)",
+				"extensions/pi861/tsconfig.host-source.json (source host)",
+				"root tsconfig.json (tsgo via npm run check)"
+			],
+			"startup": "CI pi-host matrix (published+source x linux+windows) runs test/pi-host.integration.mjs + test/runtime-host.integration.mjs against the real Pi CLI with a deterministic local provider; test/host-install.integration.mjs guards duplicate install. With PI861_REQUIRE_HOST_TESTS=1 and no host resolvable, the tests throw instead of skipping."
+		},
+		{
+			"path": "extensions/pi861/index.ts",
+			"kind": "programmatic-install-entry",
+			"language": "ts",
+			"contentOwner": "P0-H / P3-I",
+			"lint": "root biome.json extensions/pi861/**/*.ts",
+			"type": [
+				"extensions/pi861/tsconfig.json",
+				"extensions/pi861/tsconfig.entries.json",
+				"extensions/pi861/tsconfig.host.json (published Pi host)",
+				"extensions/pi861/tsconfig.host-source.json (source host)",
+				"root tsconfig.json (tsgo via npm run check)"
+			],
+			"startup": "Loaded by the CI pi-host matrix through runtime.ts and by extensions/pi861/examples/postgres-extension.mjs; installPi861 is the single composition surface."
+		},
+		{
+			"path": "extensions/pi861/scripts/run-acceptance.mjs",
+			"kind": "operator-cli",
+			"language": "mjs",
+			"contentOwner": "P1-Q",
+			"lint": "root biome.json extensions/pi861/scripts/**/*.mjs",
+			"type": ["extensions/pi861/tsconfig.entries.json (checkJs)"],
+			"startup": "Operator command: node extensions/pi861/scripts/run-acceptance.mjs ABSOLUTE_CONFIG [ABSOLUTE_REPORT_JSON]. Default-closed: refuses non-absolute paths and exits 1 without a trusted config; P1-Q owns the runner contract."
+		},
+		{
+			"path": "extensions/pi861/scripts/real-acceptance/real-model.mjs",
+			"kind": "operator-cli",
+			"language": "mjs",
+			"contentOwner": "P1-Q",
+			"lint": "root biome.json extensions/pi861/scripts/**/*.mjs",
+			"type": ["extensions/pi861/tsconfig.entries.json (checkJs)"],
+			"startup": "Default-closed: without PI861_REAL_MODEL_ACCEPTANCE=1 the script performs zero requests and reports status=deferred with exit 0 (runner ran; deferred is never a pass). Real-service execution stays behind explicit authorization (K10)."
+		},
+		{
+			"path": "extensions/pi861/scripts/real-acceptance/real-search.mjs",
+			"kind": "operator-cli",
+			"language": "mjs",
+			"contentOwner": "P1-Q",
+			"lint": "root biome.json extensions/pi861/scripts/**/*.mjs",
+			"type": ["extensions/pi861/tsconfig.entries.json (checkJs)"],
+			"startup": "Default-closed: without PI861_REAL_SEARCH_ACCEPTANCE=1 the script performs zero requests and reports status=deferred with exit 0 (runner ran; deferred is never a pass). Real-service execution stays behind explicit authorization (K10)."
+		},
+		{
+			"path": "extensions/pi861/scripts/real-acceptance/real-mcp.mjs",
+			"kind": "operator-cli",
+			"language": "mjs",
+			"contentOwner": "P1-Q",
+			"lint": "root biome.json extensions/pi861/scripts/**/*.mjs",
+			"type": ["extensions/pi861/tsconfig.entries.json (checkJs)"],
+			"startup": "Default-closed: without PI861_REAL_MCP_ACCEPTANCE=1 the script must exit non-zero and contact nothing. Real-service execution stays behind explicit authorization (K10)."
+		},
+		{
+			"path": "extensions/pi861/examples/postgres-extension.mjs",
+			"kind": "composition-example",
+			"language": "mjs",
+			"contentOwner": "P2-D (composes src/postgres.ts)",
+			"lint": "root biome.json extensions/pi861/examples/**/*.mjs",
+			"type": ["extensions/pi861/tsconfig.entries.json (checkJs)"],
+			"startup": "Operator composition example: install pg in a separate operator-owned extension directory (runtime import stays operator-side; only its TYPES are verified here via the pinned root @types/pg devDependency) and start Pi with this extension. No automatic startup: it is type- and lint-checked only, which is its acceptance correspondence."
+		}
+	],
+	"reserved": [
+		{
+			"path": "extensions/pi861/scripts/worker-service.mjs",
+			"plannedBy": "P2-W",
+			"check": "K7",
+			"coveredByExistingGlobs": ["extensions/pi861/scripts/**/*.mjs (biome + tsconfig.entries.json)"]
+		},
+		{
+			"path": "extensions/pi861/scripts/storage-service.mjs",
+			"plannedBy": "P2-D",
+			"check": "K4",
+			"coveredByExistingGlobs": ["extensions/pi861/scripts/**/*.mjs (biome + tsconfig.entries.json)"]
+		},
+		{
+			"path": "extensions/pi861/src/live/web-extract-process.ts",
+			"plannedBy": "P2-E",
+			"check": "K6",
+			"coveredByExistingGlobs": ["extensions/pi861/**/*.ts (biome + root tsconfig + extension tsconfigs)"]
+		}
+	],
+	"configAssertions": {
+		"biomeFilesIncludesMustContain": [
+			"extensions/pi861/**/*.ts",
+			"extensions/pi861/examples/**/*.mjs",
+			"extensions/pi861/scripts/**/*.mjs"
+		],
+		"rootTsconfigIncludeMustContain": ["extensions/pi861/**/*.ts"],
+		"rootTsconfigExcludeMustNotMatchEntries": true,
+		"entriesTsconfigIncludeMustContain": [
+			"runtime.ts",
+			"index.ts",
+			"src/**/*.ts",
+			"examples/**/*.mjs",
+			"scripts/**/*.mjs"
+		],
+		"entriesTsconfigRequires": { "allowJs": true, "checkJs": true },
+		"extensionPackagePiExtensionsMustBe": ["runtime.ts"]
+	}
+}
