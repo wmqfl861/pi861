@@ -33,6 +33,8 @@ export interface Role {
 	id: string;
 	skillIds: string[];
 	grants: { toolId: string; accountId: string; resourceIds: string[] }[];
+	/** C7 read scopes; when a stored artifact carries a scope, only matching readers see it. */
+	readScopes?: string[];
 }
 export interface ToolDefinition {
 	id: string;
@@ -76,7 +78,8 @@ export class SkillCatalog {
 		const source = this.originals.get(JSON.stringify([id, revision]));
 		return source ? structuredClone(source) : undefined;
 	}
-	publish(skill: RuntimeSkill): void {
+	/** Registers the immutable version; only active publishes also appear in role browsing. */
+	publish(skill: RuntimeSkill, active = true): void {
 		if (!skill.id || !skill.revision || !skill.instructions.trim() || !skill.sources.length ||
 			!skill.branches.length || new Set(skill.branches.map((branch) => branch.id)).size !== skill.branches.length) {
 			throw new Error("Invalid runtime skill");
@@ -100,7 +103,7 @@ export class SkillCatalog {
 		const existing = this.versions.get(key);
 		if (existing && digest(existing) !== digest(skill)) throw new Error("Published versions are immutable");
 		this.versions.set(key, structuredClone(skill));
-		this.published.set(skill.id, structuredClone(skill));
+		if (active) this.published.set(skill.id, structuredClone(skill));
 	}
 	browse(role: Role, category?: string): { id: string; revision: string; title: string; category: string }[] {
 		return [...this.published.values()].filter((skill) => role.skillIds.includes(skill.id) &&
