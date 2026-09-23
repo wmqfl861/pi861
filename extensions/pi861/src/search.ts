@@ -1,5 +1,6 @@
 /** Explicitly configured web search; independent of the current reasoning model. */
-import { packResult, type ResultStore } from "./result-store.ts";
+import { TextDecoder } from "node:util";
+import type { PackedResult, ResultMetadata, StoredResultReference } from "./result-store.ts";
 import { abortable } from "./web-control.ts";
 
 export interface SearchHit {
@@ -14,6 +15,7 @@ export interface SearchCache {
 export interface SearchResult {
 	query: string;
 	provider: string;
+	endpoint: string;
 	retrievedAt: string;
 	results: SearchHit[];
 	truncated: boolean;
@@ -187,6 +189,10 @@ export async function webSearch(query: string, options: SearchOptions, signal?: 
 	const capabilities = backend.capabilities();
 	if (capabilities.requiresApiKey && !options.apiKey?.trim())
 		throw new SearchFailure("Missing BRAVE_SEARCH_API_KEY", "not_configured");
+	// Capture the endpoint of the backend that will actually execute before dispatch. The
+	// captured value is immutable for this call and for every reference it produces; neither a
+	// payload field nor later backend configuration can rewrite it.
+	const endpoint = backend.endpoint;
 	if (typeof query !== "string" || !query.trim() || query.length > 600 || query.trim().split(/\s+/).length > 75)
 		throw new SearchFailure("Search query must contain 1-600 characters and at most 75 words", "invalid_query");
 	const count = options.maxResults ?? 5,
@@ -226,6 +232,10 @@ export async function webSearch(query: string, options: SearchOptions, signal?: 
 			effective.throwIfAborted();
 			return {
 				...found,
+				// The result binds the identity of the backend that actually executed; adapter
+				// payload fields cannot claim a different provider or endpoint.
+				provider: backend.id,
+				endpoint,
 				complete: !found.truncated,
 				untrusted: true,
 				scope: options.scope ?? "",
@@ -244,21 +254,36 @@ export async function webSearch(query: string, options: SearchOptions, signal?: 
 	}
 }
 
+/**
+ * Structural packing seam: satisfied by the default in-memory ResultStore (session lifetime
+ * only, never persistence) and by future persistent reference backends injected by the
+ * integrator (P2-M reference service). The public class shape stays in result-store.ts.
+ */
+interface ReferenceStore {
+	store(text: string, owner: string, metadata?: ResultMetadata): StoredResultReference;
+}
 /** A reference retains metadata and source completeness for subsequent authorized pages. */
 export function packSearchResult(
 	result: SearchResult,
-	store: ResultStore | undefined,
+	store: ReferenceStore | undefined,
 	owner: string,
 	inlineLimit = 32_000,
-) {
-	return packResult(JSON.stringify(result), owner, {
-		store,
-		inlineLimit,
-		metadata: {
+): PackedResult {
+	if (!Number.isSafeInteger(inlineLimit) || inlineLimit < 1) throw new Error("Invalid inline limit");
+	const serialized = JSON.stringify(result);
+	const bytes = Buffer.byteLength(serialized, "utf8");
+	if (bytes <= inlineLimit) return { inline: true, text: serialized, bytes };
+	if (!store) throw new Error("Result exceeds the inline limit and no controlled-reference store is configured");
+	// The reference binds the endpoint of the backend that actually executed (never a fixed
+	// Brave URL), so every later page re-authorizes against the real source of the data.
+	return {
+		inline: false,
+		...store.store(serialized, owner, {
 			kind: "search",
 			scope: result.scope,
-			url: braveBackend.endpoint,
+			url: result.endpoint,
 			sourceComplete: result.complete,
-		},
-	});
+		}),
+		complete: false,
+	};
 }
