@@ -135,6 +135,47 @@ export function planWithdrawal(record: MemoryRecord, derivatives: readonly Memor
 
 export type AssemblyMode = "startup" | "takeover" | "model-switch" | "compaction" | "node-switch" | "event-recall";
 
+/**
+ * R6.12 adoption event: only an integration acceptance can promote a candidate record to an
+ * adopted project fact. The digest MUST be the C7 `evidenceDigest()` of the acceptance evidence
+ * that authorized the adoption; branch completion alone has no such digest and can never promote.
+ */
+export interface AdoptionEvent {
+	version: 1;
+	recordId: string;
+	scope: string;
+	adoptedAt: number;
+	/** evidenceDigest() of the C7 acceptance evidence authorizing this adoption. */
+	acceptanceEvidenceDigest: string;
+	adoptedBy: string;
+}
+
+/** Promotes a candidate to confirmed by appending verified adoption provenance; nothing else may. */
+export function applyAdoption(record: MemoryRecord, event: AdoptionEvent): MemoryRecord {
+	if (
+		event.version !== 1 ||
+		!event.adoptedBy ||
+		!Number.isFinite(event.adoptedAt) ||
+		!/^[0-9a-f]{64}$/.test(event.acceptanceEvidenceDigest)
+	)
+		throw new Error("Invalid adoption event");
+	if (event.recordId !== record.id || event.scope !== formatScope(record.scope))
+		throw new Error("Adoption event does not match the record");
+	if (record.status !== "candidate") throw new Error("Only candidate records can be adopted");
+	const adopted: MemoryRecord = {
+		...structuredClone(record),
+		provenance: [
+			...structuredClone(record.provenance),
+			{ sourceKind: "verified", ref: `adoption:${event.acceptanceEvidenceDigest}`, at: event.adoptedAt },
+		],
+		revision: record.revision + 1,
+		status: "confirmed",
+		updatedAt: event.adoptedAt,
+	};
+	validateMemoryRecord(adopted);
+	return adopted;
+}
+
 export interface ContextAssemblyOptions {
 	mode: AssemblyMode;
 	maxBytes: number;

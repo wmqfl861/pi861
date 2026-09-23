@@ -13,6 +13,22 @@ import { isValidScope, resolveOutbound } from "./identity.ts";
 
 export type ConfigLayerName = "global" | "project" | "role" | "agent" | "subagent";
 
+/**
+ * G8: configuration carries credentials only as environment variable NAMES (for example
+ * `database.urlEnv`, `remoteWorkers[].tokenEnv`), never as values. Runtime resolves the named
+ * variable inside the trusted host; secrets never enter model context or logs.
+ */
+export interface SecretEnvRef {
+	envVar: string;
+}
+
+const ENV_VAR_PATTERN = /^[A-Z][A-Z0-9_]{0,99}$/;
+
+export function validateSecretEnvRef(ref: SecretEnvRef): void {
+	if (typeof ref.envVar !== "string" || !ENV_VAR_PATTERN.test(ref.envVar))
+		throw new Error("Secret references must name an environment variable");
+}
+
 export interface BehaviorPreferences {
 	executionModePreference: "auto" | "direct" | "fixed" | "dynamic";
 	failoverEnabled: boolean;

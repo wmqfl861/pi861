@@ -13,11 +13,21 @@ import { digest } from "./hash.ts";
 export type EvidenceKind = "structural-check" | "behavioral-check" | "independent-review" | "human-acceptance";
 export type RecorderKind = "trusted-automated-checker" | "agent" | "human";
 
+/**
+ * G7 honest outcome vocabulary. `skip`, `not-run` and `blocked` are distinct from `fail` and can
+ * NEVER satisfy a clause; a skip is not a pass and an unexecuted check is not a pass. Evidence
+ * recorded without an explicit outcome falls back to its passed flag, which automated kinds
+ * additionally bound by requiring exit code 0.
+ */
+export type CheckOutcome = "pass" | "fail" | "skip" | "not-run" | "blocked";
+
 export interface AcceptanceEvidence {
 	clauseId: string;
 	kind: EvidenceKind;
 	artifact: ArtifactReference;
 	passed: boolean;
+	/** Explicit outcome; when present it must agree with `passed` (only `pass` means passed). */
+	outcome?: CheckOutcome;
 	commandDigest?: string;
 	exitCode?: number;
 	summary: string;
@@ -67,6 +77,13 @@ export class AcceptanceLedger {
 			!evidence.artifact.contentDigest
 		) {
 			throw new Error("Invalid acceptance evidence");
+		}
+		if (
+			evidence.outcome !== undefined &&
+			(!["pass", "fail", "skip", "not-run", "blocked"].includes(evidence.outcome) ||
+				(evidence.outcome === "pass") !== evidence.passed)
+		) {
+			throw new Error("Outcome must be one of pass/fail/skip/not-run/blocked and agree with passed");
 		}
 		if (evidence.kind === "structural-check" || evidence.kind === "behavioral-check") {
 			if (evidence.recorderKind !== "trusted-automated-checker")
@@ -157,4 +174,20 @@ export function evidenceDigest(evidence: AcceptanceEvidence): string {
 		evidence.artifact.contentDigest,
 		evidence.passed,
 	]);
+}
+
+/**
+ * G7 report summary: counts evidence per outcome so reports expose skip/not-run/blocked counts
+ * separately instead of folding them into passes. Evidence without an explicit outcome derives
+ * one from its passed flag.
+ */
+export function summarizeOutcomes(evidence: readonly AcceptanceEvidence[]): { outcome: CheckOutcome; count: number }[] {
+	const counts = new Map<CheckOutcome, number>();
+	for (const item of evidence) {
+		const outcome = item.outcome ?? (item.passed ? "pass" : "fail");
+		counts.set(outcome, (counts.get(outcome) ?? 0) + 1);
+	}
+	return [...counts.entries()]
+		.map(([outcome, count]) => ({ outcome, count }))
+		.sort((left, right) => left.outcome.localeCompare(right.outcome));
 }

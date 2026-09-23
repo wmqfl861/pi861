@@ -7,6 +7,22 @@ import { digest } from "./hash.ts";
  * or widen a credential. Wire-level authentication for remote nodes is layered on top by M4.
  */
 
+/**
+ * G1 trusted-local defaults. The well-known `local` tenant and the `main` principal (overridable
+ * through PI861_AGENT_ID) exist only in single-process trusted-local mode: an authority for the
+ * local tenant must be constructed with trustedLocal=true, and remote or multi-node services must
+ * never construct such an authority, so a self-asserted tenant=local credential has no verifier.
+ */
+export const TRUSTED_LOCAL_TENANT_ID = "local";
+export const TRUSTED_LOCAL_PRINCIPAL_ENV = "PI861_AGENT_ID";
+export const TRUSTED_LOCAL_FALLBACK_PRINCIPAL_ID = "main";
+
+/** Resolves the trusted-local principal id from the host environment; invalid ids are rejected. */
+export function trustedLocalPrincipalId(envValue: string | undefined): string {
+	const candidate = envValue === undefined || envValue.trim() === "" ? TRUSTED_LOCAL_FALLBACK_PRINCIPAL_ID : envValue;
+	return identityPart(candidate);
+}
+
 export type ScopeKind = "user" | "project" | "group" | "agent" | "task" | "shared";
 const SCOPE_PATTERN = /^(user|project|group|agent|task|shared):[a-z0-9][a-z0-9._/-]{0,200}$/;
 
@@ -288,7 +304,7 @@ export class IdentityAuthority {
 	private serial = 0;
 	private epoch = 1;
 
-	constructor(options: { authorityId: string; tenantId: string; roles: RoleDefinition[] }) {
+	constructor(options: { authorityId: string; tenantId: string; roles: RoleDefinition[]; trustedLocal?: boolean }) {
 		if (
 			!options.authorityId ||
 			options.authorityId.length > 200 ||
@@ -296,6 +312,9 @@ export class IdentityAuthority {
 			options.tenantId.length > 200
 		) {
 			throw new Error("Authority identity required");
+		}
+		if (options.tenantId === TRUSTED_LOCAL_TENANT_ID && options.trustedLocal !== true) {
+			throw new Error("The local tenant exists only in trusted-local mode");
 		}
 		this.authorityId = options.authorityId;
 		this.tenantId = options.tenantId;

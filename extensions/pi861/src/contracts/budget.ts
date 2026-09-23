@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 /**
  * C3 budget contract: whole-task-tree capacity with reserve-then-settle metering for every
  * actual model attempt - execution, reception, planning, skill compilation, memory distillation,
@@ -29,6 +31,8 @@ export interface UsageReservation {
 	estimate: UsageMeasure;
 	openedAt: number;
 	state: "reserved" | "settled" | "settled-unknown" | "released";
+	/** Single-flight key: while one reservation with this key stays open, no other may exist. */
+	probeKey?: string;
 }
 
 export interface TaskUsageSummary {
@@ -49,6 +53,19 @@ export class BudgetExhausted extends Error {
 		this.scope = scope;
 		this.limits = { ...limits };
 		this.requested = { ...requested };
+	}
+}
+
+/**
+ * A physical probe is already reserved: the caller must wait for the in-flight reservation's
+ * settlement instead of booking a second reservation for the same probe. This is the frozen
+ * single-flight cost rule - one physical probe bills exactly once (R2.6).
+ */
+export class ProbeInFlight extends Error {
+	readonly probeKey: string;
+	constructor(probeKey: string) {
+		super(`A probe is already in flight for ${probeKey}`);
+		this.probeKey = probeKey;
 	}
 }
 
@@ -121,10 +138,20 @@ export class TaskTreeBudget {
 	private rootAttempts = 0;
 	private rootUnknown = 0;
 	private reservationSequence = 0;
+	private budgetIdValue: string;
 
-	constructor(rootLimits: BudgetLimits) {
+	/** Root budget identity: durable stores key reservations and snapshots by this id. */
+	get budgetId(): string {
+		return this.budgetIdValue;
+	}
+
+	constructor(rootLimits: BudgetLimits, options: { budgetId?: string } = {}) {
 		validateLimits(rootLimits);
+		if (options.budgetId !== undefined && (!options.budgetId || options.budgetId.length > 200)) {
+			throw new Error("Invalid budget identity");
+		}
 		this.rootLimits = { ...rootLimits };
+		this.budgetIdValue = options.budgetId ?? `budget-${randomUUID()}`;
 	}
 
 	registerTask(taskId: string, parentTaskId: string | null, subtreeLimits?: BudgetLimits): void {
@@ -164,10 +191,29 @@ export class TaskTreeBudget {
 		return false;
 	}
 
-	/** Reserves capacity before the request is dispatched; throws BudgetExhausted when any bound would be crossed. */
-	reserve(taskId: string | null, kind: MeteredKind, estimate: UsageMeasure, now: number): UsageReservation {
+	/**
+	 * Reserves capacity before the request is dispatched; throws BudgetExhausted when any bound
+	 * would be crossed. A probe with a probeKey throws ProbeInFlight while an equal probeKey is
+	 * still open - shared probes join the in-flight reservation, they never book a second one.
+	 */
+	reserve(
+		taskId: string | null,
+		kind: MeteredKind,
+		estimate: UsageMeasure,
+		now: number,
+		options: { probeKey?: string } = {},
+	): UsageReservation {
 		validateUsage(estimate);
 		if (!Number.isFinite(now)) throw new Error("Invalid reservation time");
+		if (options.probeKey !== undefined) {
+			if (kind !== "probe") throw new Error("Only probe reservations carry a probe key");
+			if (!options.probeKey || options.probeKey.length > 200) throw new Error("Invalid probe key");
+			for (const reservation of this.reservations.values()) {
+				if (reservation.state === "reserved" && reservation.probeKey === options.probeKey) {
+					throw new ProbeInFlight(options.probeKey);
+				}
+			}
+		}
 		const chain = this.chainFrom(taskId);
 		for (const node of chain) {
 			const limits = node.limits;
@@ -182,6 +228,7 @@ export class TaskTreeBudget {
 			estimate: { ...estimate },
 			openedAt: now,
 			state: "reserved",
+			...(options.probeKey !== undefined ? { probeKey: options.probeKey } : {}),
 		};
 		this.reservations.set(reservation.reservationId, reservation);
 		return structuredClone(reservation);
@@ -285,7 +332,8 @@ export class TaskTreeBudget {
 	}
 
 	exportState(): {
-		version: 1;
+		version: 2;
+		budgetId: string;
 		rootLimits: BudgetLimits;
 		rootAttempts: number;
 		rootUsage: UsageMeasure;
@@ -294,7 +342,8 @@ export class TaskTreeBudget {
 		reservations: UsageReservation[];
 	} {
 		return {
-			version: 1,
+			version: 2,
+			budgetId: this.budgetId,
 			rootLimits: { ...this.rootLimits },
 			rootAttempts: this.rootAttempts,
 			rootUsage: { ...this.rootUsage },
@@ -306,7 +355,10 @@ export class TaskTreeBudget {
 
 	restore(snapshot: ReturnType<TaskTreeBudget["exportState"]>): void {
 		if (
-			snapshot.version !== 1 ||
+			snapshot.version !== 2 ||
+			typeof snapshot.budgetId !== "string" ||
+			!snapshot.budgetId ||
+			snapshot.budgetId.length > 200 ||
 			!Number.isSafeInteger(snapshot.rootAttempts) ||
 			snapshot.rootAttempts < 0 ||
 			!Array.isArray(snapshot.tasks) ||
@@ -334,6 +386,7 @@ export class TaskTreeBudget {
 		}
 		const reservations = new Map<string, UsageReservation>();
 		let sequence = 0;
+		const openProbeKeys = new Set<string>();
 		for (const reservation of snapshot.reservations) {
 			const match = /^r-([1-9][0-9]*)$/.exec(reservation.reservationId);
 			const number = Number(match?.[1]);
@@ -345,9 +398,18 @@ export class TaskTreeBudget {
 				!["execution", "reception", "planning", "skill-compile", "distill", "probe", "auxiliary"].includes(
 					reservation.kind,
 				) ||
-				(reservation.taskId !== null && !seen.has(reservation.taskId))
+				(reservation.taskId !== null && !seen.has(reservation.taskId)) ||
+				(reservation.probeKey !== undefined &&
+					(reservation.kind !== "probe" ||
+						typeof reservation.probeKey !== "string" ||
+						!reservation.probeKey ||
+						reservation.probeKey.length > 200))
 			)
 				throw new Error("Invalid reservation snapshot");
+			if (reservation.state === "reserved" && reservation.probeKey !== undefined) {
+				if (openProbeKeys.has(reservation.probeKey)) throw new Error("Invalid reservation snapshot");
+				openProbeKeys.add(reservation.probeKey);
+			}
 			validateUsage(reservation.estimate);
 			reservations.set(reservation.reservationId, structuredClone(reservation));
 			sequence = Math.max(sequence, number);
@@ -386,5 +448,179 @@ export class TaskTreeBudget {
 		this.rootUnknown = snapshot.rootUnknown;
 		for (const [id, reservation] of reservations) this.reservations.set(id, reservation);
 		this.reservationSequence = sequence;
+		this.budgetIdValue = snapshot.budgetId;
+	}
+}
+
+/** R3.1 frozen scheduling defaults; every value is overridable through layered configuration. */
+export interface SchedulingDefaults {
+	maxConcurrentTasks: number;
+	attemptsPerTask: number;
+	maxProjectTasks: number;
+}
+
+export const DEFAULT_SCHEDULING: SchedulingDefaults = {
+	maxConcurrentTasks: 2,
+	attemptsPerTask: 2,
+	maxProjectTasks: 100,
+};
+
+export class CapacityExhausted extends Error {
+	readonly taskId: string;
+	readonly runningCount: number;
+	readonly maxConcurrentTasks: number;
+	constructor(taskId: string, runningCount: number, maxConcurrentTasks: number) {
+		super(`Task capacity exhausted for ${taskId}`);
+		this.taskId = taskId;
+		this.runningCount = runningCount;
+		this.maxConcurrentTasks = maxConcurrentTasks;
+	}
+}
+
+export type TaskSlotState = "registered" | "running" | "waiting" | "finished";
+
+export interface TaskSlotSummary {
+	taskId: string;
+	parentTaskId: string | null;
+	state: TaskSlotState;
+	since: number;
+}
+
+/**
+ * C3 task capacity: whole-tree slot accounting. A slot is held only while the task runs; a
+ * parent waiting on descendants releases its slot, but every descendant still competes for the
+ * same root concurrency cap (R3.6). Finished tasks free their slot and stay counted toward the
+ * project task total. The scheduler (P2-G) owns WHEN to start; this contract owns the bound.
+ */
+export class TaskTreeCapacity {
+	private maxConcurrentTasksValue: number;
+	private maxProjectTasksValue: number;
+	private readonly slots = new Map<string, { parentTaskId: string | null; state: TaskSlotState; since: number }>();
+
+	constructor(options: { maxConcurrentTasks?: number; maxProjectTasks?: number } = {}) {
+		const maxConcurrentTasks = options.maxConcurrentTasks ?? DEFAULT_SCHEDULING.maxConcurrentTasks;
+		const maxProjectTasks = options.maxProjectTasks ?? DEFAULT_SCHEDULING.maxProjectTasks;
+		if (!Number.isSafeInteger(maxConcurrentTasks) || maxConcurrentTasks < 1)
+			throw new Error("Invalid concurrency limit");
+		if (!Number.isSafeInteger(maxProjectTasks) || maxProjectTasks < 1)
+			throw new Error("Invalid project task limit");
+		this.maxConcurrentTasksValue = maxConcurrentTasks;
+		this.maxProjectTasksValue = maxProjectTasks;
+	}
+
+	get maxConcurrentTasks(): number {
+		return this.maxConcurrentTasksValue;
+	}
+
+	get maxProjectTasks(): number {
+		return this.maxProjectTasksValue;
+	}
+
+	get runningCount(): number {
+		let running = 0;
+		for (const slot of this.slots.values()) if (slot.state === "running") running++;
+		return running;
+	}
+
+	registerTask(taskId: string, parentTaskId: string | null): void {
+		if (!taskId || taskId.length > 200 || this.slots.has(taskId))
+			throw new Error("Invalid or duplicate task registration");
+		if (parentTaskId !== null && !this.slots.has(parentTaskId)) throw new Error("Unknown parent task");
+		if (this.slots.size >= this.maxProjectTasksValue) throw new Error("Project task limit reached");
+		this.slots.set(taskId, { parentTaskId, state: "registered", since: 0 });
+	}
+
+	/** Acquires - or after waiting re-acquires - one of the tree-wide concurrent slots. */
+	start(taskId: string, now: number): void {
+		const slot = this.require(taskId, now);
+		if (slot.state !== "registered" && slot.state !== "waiting")
+			throw new Error(`Task ${taskId} cannot start from ${slot.state}`);
+		if (this.runningCount >= this.maxConcurrentTasksValue)
+			throw new CapacityExhausted(taskId, this.runningCount, this.maxConcurrentTasksValue);
+		slot.state = "running";
+		slot.since = now;
+	}
+
+	/** A parent waiting on descendants releases its slot; descendants still share the root cap. */
+	beginWaiting(taskId: string, now: number): void {
+		const slot = this.require(taskId, now);
+		if (slot.state !== "running") throw new Error(`Only a running task can wait: ${taskId}`);
+		slot.state = "waiting";
+		slot.since = now;
+	}
+
+	finish(taskId: string, now: number): void {
+		const slot = this.require(taskId, now);
+		if (slot.state === "finished") throw new Error(`Task ${taskId} already finished`);
+		slot.state = "finished";
+		slot.since = now;
+	}
+
+	slotSummary(taskId: string): TaskSlotSummary {
+		const slot = this.slots.get(taskId);
+		if (!slot) throw new Error(`Unknown task: ${taskId}`);
+		return { taskId, parentTaskId: slot.parentTaskId, state: slot.state, since: slot.since };
+	}
+
+	exportState(): { version: 1; maxConcurrentTasks: number; maxProjectTasks: number; slots: TaskSlotSummary[] } {
+		return {
+			version: 1,
+			maxConcurrentTasks: this.maxConcurrentTasksValue,
+			maxProjectTasks: this.maxProjectTasksValue,
+			slots: [...this.slots.keys()].map((taskId) => this.slotSummary(taskId)),
+		};
+	}
+
+	restore(snapshot: ReturnType<TaskTreeCapacity["exportState"]>): void {
+		if (
+			snapshot.version !== 1 ||
+			!Number.isSafeInteger(snapshot.maxConcurrentTasks) ||
+			snapshot.maxConcurrentTasks < 1 ||
+			!Number.isSafeInteger(snapshot.maxProjectTasks) ||
+			snapshot.maxProjectTasks < 1 ||
+			!Array.isArray(snapshot.slots) ||
+			snapshot.slots.length > snapshot.maxProjectTasks
+		)
+			throw new Error("Invalid capacity snapshot");
+		const restored = new Map<string, { parentTaskId: string | null; state: TaskSlotState; since: number }>();
+		for (const slot of snapshot.slots) {
+			if (
+				!slot.taskId ||
+				slot.taskId.length > 200 ||
+				restored.has(slot.taskId) ||
+				!["registered", "running", "waiting", "finished"].includes(slot.state) ||
+				!Number.isFinite(slot.since) ||
+				(slot.state === "registered" && slot.since !== 0)
+			)
+				throw new Error("Invalid capacity snapshot entry");
+			restored.set(slot.taskId, { parentTaskId: slot.parentTaskId, state: slot.state, since: slot.since });
+		}
+		for (const slot of snapshot.slots) {
+			if (slot.parentTaskId !== null && !restored.has(slot.parentTaskId))
+				throw new Error("Invalid capacity snapshot entry");
+		}
+		for (const slot of snapshot.slots) {
+			const seen = new Set<string>([slot.taskId]);
+			let parent = slot.parentTaskId;
+			while (parent !== null) {
+				if (seen.has(parent)) throw new Error("Invalid cyclic capacity snapshot");
+				seen.add(parent);
+				parent = restored.get(parent)?.parentTaskId ?? null;
+			}
+		}
+		let running = 0;
+		for (const slot of restored.values()) if (slot.state === "running") running++;
+		if (running > snapshot.maxConcurrentTasks) throw new Error("Invalid capacity snapshot: over concurrency");
+		this.slots.clear();
+		for (const [taskId, slot] of restored) this.slots.set(taskId, slot);
+		this.maxConcurrentTasksValue = snapshot.maxConcurrentTasks;
+		this.maxProjectTasksValue = snapshot.maxProjectTasks;
+	}
+
+	private require(taskId: string, now: number): { parentTaskId: string | null; state: TaskSlotState; since: number } {
+		if (!Number.isFinite(now)) throw new Error("Invalid capacity time");
+		const slot = this.slots.get(taskId);
+		if (!slot) throw new Error(`Unknown task: ${taskId}`);
+		return slot;
 	}
 }
