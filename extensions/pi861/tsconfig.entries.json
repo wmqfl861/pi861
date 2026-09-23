@@ -12,8 +12,5 @@
     "scripts/**/*.mjs",
     "../../packages/*/src/**/*.d.ts",
     "../../packages/session-backends/*/src/**/*.d.ts"
-  ],
-  "exclude": [
-    "examples/postgres-extension.mjs"
   ]
 }
