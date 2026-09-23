@@ -233,3 +233,13 @@ pi -e ./extensions/pi861/runtime.ts
 4. 检查命令白名单（checks）里的可执行文件本身受 operator 信任（文件守卫不沙箱检查程序）。
 5. 状态目录 0700；集成身份文件 0600；`stateDirectory` 不应放进源仓库。
 6. 密钥只经环境变量注入；日志与错误输出有启发式脱敏（publicError），不保证识别所有秘密。
+
+## 10. 本轮配置面变化登记（2026-09-23 continuation，P1-L）
+
+本节只登记续开发计划已确定的配置面归属与新增面，具体字段在各自包实现时补入本台账；第 1–9 节仍描述当前代码（e3f07a789/主树 dirty）的配置面。计划指针与 SHA256 见 [HANDOFF.md](HANDOFF.md) 本轮段。
+
+1. **根配置唯一所有者**：根配置、依赖、lock/shrinkwrap、全部 tsconfig、扩展 package 入口声明、CI 归 T（P0-T `p0-toolchain`）独占；其他包只报需求，不自行安装或改锁文件（计划第 4 节）。依赖固定版本；undici 升级须先审阅目标发布说明。
+2. **Worker 双模式（计划第 4 节确定的新配置面）**：可信本地进程模式（如实标注无 OS 沙箱）与 Linux OCI 容器隔离模式（非 root、限 capability、不挂宿主凭据/管理 socket、限定可写目录、进程/CPU/内存限制、默认禁非批准网络）必须显式配置声明，能力报告必须准确；环境不支持容器时 R3.8 与生产隔离验收保持阻塞（P2-W/P4-D）。
+3. **配置继承收紧原则（C1）**：全局默认→项目/岗位→Agent→子 Agent 的继承体系由 P1-C/P1-S 落地；任何覆盖只能收紧权限上限，不得扩张（对应 R1.7/R6.18，见第 5 节"未实现"项的演进落点）。
+4. **新增入口与检查面**：计划新增 `scripts/storage-service.mjs`（P2-D）、`scripts/worker-service.mjs`（P2-W）、`src/live/web-extract-process.ts` 或等效受控抽取入口（P2-E）、`scripts/run-acceptance.mjs` 的 CLI 合同 `--suite <unit|hosts|pg17|mcp|web|workers|ax|local> --manifest <绝对路径> --evidence <绝对路径>`（P1-Q，待实现合同，现脚本不支持）。以上入口由 T 纳入生产入口清单与检查链（K0–K9 组定义见计划第 7 节），测试环境变量（`PI861_TEST_SOURCE_HOST` 等）沿用计划第 7 节与 HANDOFF 2026-09-22 段记录。
+5. **外部真实服务脚本默认关闭**：真实模型/Brave/业务 MCP 验收脚本属 K10 层，默认关闭、需显式授权，凭据变量名、预算上限、允许数据、清理方法与拒绝默认执行行为须经审核；未授权不得伪装为 skip 后通过（计划第 8 节）。
