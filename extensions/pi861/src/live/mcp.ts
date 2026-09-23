@@ -44,6 +44,7 @@ export class McpClient {
 	private cached: McpTool[] = [];
 	private lifetime = new AbortController();
 	private closing: Promise<void> = Promise.resolve();
+	private stream: AbortController | undefined;
 	constructor(server: McpServer) {
 		if (!/^[a-zA-Z0-9_-]+$/.test(server.id) || !server.accountId) throw new Error("Invalid MCP server identity");
 		for (const value of [server.timeoutMs, server.maxBytes]) {
@@ -120,6 +121,14 @@ export class McpClient {
 				}
 				this.protocol = String(reply.protocolVersion);
 				await this.notify("notifications/initialized", {}, signal);
+				if (
+					this.server.transport.kind === "http" &&
+					record(record(reply.capabilities)?.tools)?.listChanged === true
+				) {
+					// Only servers that announce tools.listChanged get a standing GET stream; a server
+					// answering 405 has no push channel and requests keep working via POST.
+					void this.openNotificationStream();
+				}
 				if (epoch !== this.generation) throw new Error("Stale MCP connection");
 			})().catch(async (error: unknown) => {
 				if (epoch === this.generation) {
@@ -139,6 +148,68 @@ export class McpClient {
 			return;
 		}
 		await this.http(payload, signal);
+	}
+	/**
+	 * Standing GET event stream for server-initiated notifications (Streamable HTTP). Failures are
+	 * contained: the stream dying never breaks request/response traffic, and every frame stays
+	 * bounded and read-only - server-initiated requests are refused with -32601.
+	 */
+	private async openNotificationStream(): Promise<void> {
+		const transport = this.server.transport;
+		if (transport.kind !== "http") return;
+		this.stream?.abort();
+		const controller = new AbortController();
+		this.stream = controller;
+		const signal = AbortSignal.any([controller.signal, this.lifetime.signal]);
+		const headers: Record<string, string> = {
+			...transport.headers,
+			Accept: "text/event-stream",
+			"MCP-Protocol-Version": this.protocol,
+		};
+		if (this.session) headers["Mcp-Session-Id"] = this.session;
+		try {
+			const response = await fetch(transport.url, { method: "GET", headers, signal, redirect: "error" });
+			if (response.status === 405 || response.status === 404 || !response.ok || !response.body) {
+				await response.body?.cancel();
+				return;
+			}
+			const reader = response.body.getReader();
+			const decoder = new TextDecoder();
+			let buffer = "";
+			while (true) {
+				const { value, done } = await reader.read();
+				if (done) return;
+				buffer += decoder.decode(value, { stream: true });
+				if (Buffer.byteLength(buffer) > (this.server.maxBytes ?? 4_194_304)) return; // bounded stream
+				while (true) {
+					const boundary = /\r?\n\r?\n/.exec(buffer);
+					if (!boundary) break;
+					const frame = buffer.slice(0, boundary.index);
+					buffer = buffer.slice(boundary.index + boundary[0].length);
+					const data = frame
+						.split(/\r?\n/)
+						.filter((line) => line.startsWith("data:"))
+						.map((line) => line.slice(5).replace(/^ /, ""))
+						.join("\n");
+					if (!data) continue;
+					const message = record(JSON.parse(data));
+					if (!message) return;
+					this.message(message);
+					if (message.id !== undefined && typeof message.method === "string") {
+						await this.http(
+							{ jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "Not supported" } },
+							new AbortController().signal,
+						);
+					}
+				}
+			}
+		} catch {
+			// A dead push channel is not a connection failure; POST traffic continues.
+		}
+	}
+	/** Current wire session id, for host-side diagnostics on Streamable HTTP connections. */
+	get sessionId(): string | undefined {
+		return this.session;
 	}
 	private async http(
 		payload: Record<string, unknown>,
@@ -316,14 +387,18 @@ export class McpClient {
 				});
 				if (tools.length > 10_000) throw new Error("MCP tool list too large");
 			}
-			if (!result.nextCursor) {
+			// Spec places the cursor at result.nextCursor; some servers send result._meta.nextCursor.
+			const meta = record(result._meta);
+			const nextCursor = typeof result.nextCursor === "string" ? result.nextCursor
+				: typeof meta?.nextCursor === "string" ? meta.nextCursor
+				: undefined;
+			if (!nextCursor) {
 				this.cached = tools;
 				if (token === this.changeToken) this.dirty = false;
 				return structuredClone(tools);
 			}
-			if (typeof result.nextCursor !== "string" || cursors.has(result.nextCursor))
-				throw new Error("Invalid MCP pagination");
-			cursor = result.nextCursor;
+			if (cursors.has(nextCursor)) throw new Error("Invalid MCP pagination");
+			cursor = nextCursor;
 			cursors.add(cursor);
 		}
 		throw new Error("MCP pagination limit exceeded");
@@ -350,6 +425,8 @@ export class McpClient {
 	}
 	close(): Promise<void> {
 		this.generation++;
+		this.stream?.abort();
+		this.stream = undefined;
 		this.lifetime.abort(new Error("MCP client closed"));
 		this.lifetime = new AbortController();
 		const closing = this.process?.close() ?? Promise.resolve();

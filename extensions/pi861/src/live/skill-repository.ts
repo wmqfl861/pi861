@@ -3,8 +3,10 @@ import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { type RawSkill, type Role, type RuntimeSkill, SkillCatalog, type ToolBinding } from "../capabilities.ts";
 import type { AcceptanceEvidence } from "../contracts/acceptance.ts";
+import { type ExecutionIdentity, isValidScope, validateExecutionIdentity } from "../contracts/identity.ts";
 import { digest } from "../memory.ts";
 import { record } from "../search.ts";
+import type { SkillCompilerPort } from "./compilers.ts";
 import { validateApprovedBindings, validateSkillEvidence } from "./skill-validation.ts";
 import type { StateStore } from "./store.ts";
 
@@ -46,6 +48,9 @@ interface StoredResult {
 	sourceBytes: number;
 	contentDigest: string;
 	truncated: boolean;
+	/** C7 controlled-reference provenance; present when the host wired scope and execution identity. */
+	scope?: string;
+	producedBy?: ExecutionIdentity;
 }
 export interface SkillState {
 	format: 1;
@@ -60,17 +65,13 @@ export interface SkillState {
 export function emptySkillState(): SkillState {
 	return { format: 1, sources: [], activeSources: {}, candidates: [], versions: [], active: {} };
 }
-export interface SkillCompiler {
-	compile(
-		input: {
-			group: string;
-			sources: SkillSource[];
-			documents: { sourceId: string; path: string; content: string }[];
-			approvedBindings: ToolBinding[];
-		},
-		signal: AbortSignal,
-	): Promise<RuntimeSkill>;
-}
+/**
+ * K compile boundary, aliased to the frozen P1-S port so the compile input shape (including the
+ * operator-approvedBindings array) cannot drift between the repository and the shared invocation
+ * service. Host wiring must supply an implementation routed through
+ * AuxiliaryModelInvocations.compileSkill (see skill-services.ts), never a bare model call.
+ */
+export type SkillCompiler = SkillCompilerPort;
 export interface SkillRepositoryOptions {
 	/** Trusted host supplies a classifier backed by the shared model request service. */
 	classify?: (
@@ -152,7 +153,7 @@ export class SkillRepository {
 	async install(
 		directory: string,
 		metadata: { id: string; revision: string; group?: string },
-		signal: AbortSignal = new AbortController().signal,
+		signal = new AbortController().signal,
 	): Promise<SkillSource> {
 		if (
 			![metadata.id, metadata.revision, ...(metadata.group === undefined ? [] : [metadata.group])].every(
@@ -473,10 +474,20 @@ export class SkillRepository {
 	}
 	async storeResult(
 		value: unknown,
-		owner: { roleId: string; skillId: string; binding: ToolBinding },
+		owner: {
+			roleId: string;
+			skillId: string;
+			binding: ToolBinding;
+			/** C7 provenance; when supplied the stored reference becomes scope-guarded on every read. */
+			scope?: string;
+			producedBy?: ExecutionIdentity;
+		},
 	): Promise<string> {
 		const serialized = JSON.stringify(value);
 		if (serialized === undefined) throw new Error("Tool result is not serializable");
+		if (owner.scope !== undefined && !isValidScope(owner.scope))
+			throw new Error("Invalid artifact scope");
+		if (owner.producedBy !== undefined) validateExecutionIdentity(owner.producedBy);
 		const bytes = Buffer.from(serialized),
 			limit = this.options.maxResultBytes ?? 4_194_304;
 		const text = bytes.subarray(0, limit).toString("utf8");
@@ -508,6 +519,7 @@ export class SkillRepository {
 			(this.options.now?.() ?? Date.now()) - result.storedAt > (this.options.resultTtlMs ?? 604_800_000) ||
 			result.roleId !== role.id ||
 			!role.skillIds.includes(result.skillId) ||
+			(result.scope !== undefined && !(role.readScopes ?? []).includes(result.scope)) ||
 			!role.grants.some(
 				(grant) =>
 					grant.toolId === result.binding.toolId &&
@@ -515,6 +527,7 @@ export class SkillRepository {
 					grant.resourceIds.includes(result.binding.resourceId),
 			)
 		)
+			// Missing, revoked and out-of-scope references fail identically; existence must not leak.
 			throw new Error("Artifact not found");
 		let text = result.text;
 		if (field !== undefined) {
@@ -545,6 +558,13 @@ export class SkillRepository {
 			truncated: result.truncated,
 			complete: !result.truncated && offset === 0 && text.length <= 16_000,
 			hasMore: offset + 16_000 < text.length,
+			// C7 controlled-reference view so consumers can bind integrity without re-reading content.
+			reference: {
+				artifactId: id,
+				contentDigest: result.contentDigest,
+				byteSize: result.sourceBytes,
+				...(result.scope !== undefined ? { scope: result.scope } : {}),
+			},
 		};
 	}
 

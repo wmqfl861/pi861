@@ -1,6 +1,7 @@
 import type { PiContext, PiHost } from "../../index.ts";
 import { type Activation, authorizeInvocation, type Role, type ToolBinding } from "../capabilities.ts";
 import { type ExecutionIdentity, validateExecutionIdentity } from "../contracts/identity.ts";
+import type { FullToolIdentity } from "../contracts/capability.ts";
 import { digest } from "../memory.ts";
 import { record } from "../search.ts";
 import { type McpClient, McpFailure, type McpTool } from "./mcp.ts";
@@ -34,6 +35,11 @@ export interface CapabilityOptions {
 	operations?: OperationJournal;
 	/** Trusted task identity pins revisions until this attempt ends. */
 	executionIdentity?: () => ExecutionIdentity | undefined;
+	/**
+	 * C7 scope for controlled references to oversized tool results. When supplied, stored
+	 * references become scope-guarded: only roles whose readScopes include it can read them.
+	 */
+	resultScope?: string;
 	deploymentMode?: "trusted-local" | "isolated";
 	isolationEnforced?: boolean;
 }
@@ -52,6 +58,21 @@ function bindingKey(binding: ToolBinding): string {
 }
 function bindingName(activation: Activation, binding: ToolBinding): string {
 	return `pi861_mcp_${digest([activation.skillId, activation.skillRevision, activation.branchIds, activation.phase, binding]).slice(0, 24)}`;
+}
+/** Splits "server/tool" into the C5 full tool identity tuple carried by operation intents. */
+function c5Identity(binding: ToolBinding): { tool: FullToolIdentity } {
+	const separator = binding.toolId.indexOf("/");
+	if (separator <= 0 || separator === binding.toolId.length - 1)
+		throw new McpFailure("MCP tool id must be namespaced as server/tool", "not_dispatched");
+	return {
+		tool: {
+			serviceId: binding.toolId.slice(0, separator),
+			toolName: binding.toolId.slice(separator + 1),
+			accountId: binding.accountId,
+			resourceId: binding.resourceId,
+			schemaDigest: binding.schemaHash,
+		},
+	};
 }
 
 export function installCapabilities(pi: CapabilityHost, options: CapabilityOptions): { close(): Promise<void> } {
@@ -234,10 +255,14 @@ export function installCapabilities(pi: CapabilityHost, options: CapabilityOptio
 						const serialized = JSON.stringify(response);
 						const maxBytes = options.maxResultBytes ?? 32_000;
 						if (Buffer.byteLength(serialized) > maxBytes) {
+							const producedBy = options.executionIdentity?.();
+							if (producedBy) validateExecutionIdentity(producedBy);
 							const reference = await options.repository.storeResult(response, {
 								roleId: options.role().id,
 								skillId: activation.skillId,
 								binding,
+								...(options.resultScope !== undefined ? { scope: options.resultScope } : {}),
+								...(producedBy ? { producedBy } : {}),
 							});
 							return {
 								content: [
@@ -279,6 +304,9 @@ export function installCapabilities(pi: CapabilityHost, options: CapabilityOptio
 							resource,
 							fingerprint: digest(args),
 							readOnly: rule?.readOnly === true,
+							// C5 full tool identity: the stable business id binds the exact
+							// service/tool/account/resource/schema tuple, not just its digest.
+							...c5Identity(binding),
 						},
 						dispatch,
 					)) as Awaited<ReturnType<typeof dispatch>>;
