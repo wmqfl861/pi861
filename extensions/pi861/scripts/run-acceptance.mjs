@@ -12,9 +12,10 @@ import {
 //   Positional node scripts/run-acceptance.mjs ABS_CONFIG ABS_REPORT_JSON [ABS_REPORT_MD]
 // Commands execute only from the trusted manifest/config, in the configured artifact workspace,
 // with PATH/SystemRoot plus explicitly whitelisted environment names. Real external services
-// (scripts/real-acceptance/*) are never reachable from here: their scripts are refused and
-// their PI861_REAL_* opt-ins cannot be passed through suite manifests. The runner exits 0
-// only when every required check passed; skip, not-run, missing or timed-out checks never pass.
+// (scripts/real-acceptance/*) are never reachable from here in EITHER mode: their scripts are
+// refused in suite and positional mode, and PI861_REAL_* opt-ins cannot be passed through suite
+// manifests or per-check environments. The runner exits 0 only when every required check
+// passed; skip, not-run, missing or timed-out checks never pass.
 
 const arguments_ = process.argv.slice(2);
 
@@ -92,6 +93,12 @@ function distinctPaths(paths) {
 	return new Set(paths).size === paths.length;
 }
 
+function refuseRealServiceScripts(checks, mode) {
+	for (const check of checks)
+		if (check.command.includes("real-acceptance") || check.args.some((argument) => argument.includes("real-acceptance")))
+			throw new Error(`Check ${check.id} routes to the default-closed real-service scripts; ${mode} cannot invoke them`);
+}
+
 async function runSuiteMode() {
 	const flags = new Map();
 	for (let index = 0; index < arguments_.length; index += 2) {
@@ -112,9 +119,7 @@ async function runSuiteMode() {
 
 	const manifest = parseAcceptanceManifest(JSON.parse(readFileSync(manifestPath, "utf8")));
 	if (manifest.suite !== suite) throw new Error(`Manifest suite ${manifest.suite} does not match requested suite ${suite}`);
-	for (const check of manifest.checks)
-		if (check.command.includes("real-acceptance") || check.args.some((argument) => argument.includes("real-acceptance")))
-			throw new Error(`Check ${check.id} routes to the default-closed real-service scripts; suites cannot invoke them`);
+	refuseRealServiceScripts(manifest.checks, "suites");
 
 	const passthrough = {};
 	for (const name of manifest.environmentNames)
@@ -170,7 +175,9 @@ async function runPositionalMode() {
 	const markdown = markdownPath ?? (reportPath.endsWith(".json") ? `${reportPath.slice(0, -".json".length)}.md` : `${reportPath}.md`);
 	if (!distinctPaths([configPath, reportPath, markdown]))
 		throw new Error("Config and report paths must be distinct");
-	const report = await runAcceptance(parseAcceptanceConfig(JSON.parse(readFileSync(configPath, "utf8"))));
+	const config = parseAcceptanceConfig(JSON.parse(readFileSync(configPath, "utf8")));
+	refuseRealServiceScripts(config.checks, "positional configs");
+	const report = await runAcceptance(config);
 	const text = JSON.stringify(report, null, 2);
 	writeFileSync(reportPath, `${text}\n`, { mode: 0o600 });
 	writeFileSync(markdown, renderMarkdown(report), { mode: 0o600 });

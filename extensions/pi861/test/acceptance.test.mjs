@@ -98,6 +98,16 @@ test("invalid trusted configuration and wrong commit fail before executing", asy
 	const path = workspace(t);
 	assert.throws(() => parseAcceptanceConfig({ workspace: ".", checks: [] }), /absolute/);
 	assert.throws(() => parseAcceptanceConfig({ workspace: path, checks: [check("x", []), check("x", [])] }), /Invalid/);
+	// Review-1 D3 regression: PI861_REAL_* opt-ins must not be arming-able through check.env
+	// in any mode (the A7 attack passed them via a suite manifest's per-check environment).
+	assert.throws(
+		() => parseAcceptanceConfig({ workspace: path, checks: [check("armed", ["-e", "0"], { env: { PI861_REAL_SEARCH_ACCEPTANCE: "1" } })] }),
+		/Real-service authorization variables cannot be passed through acceptance configuration/,
+	);
+	assert.throws(
+		() => parseAcceptanceConfig({ workspace: path, checks: [{ id: "armed", command: "node", args: ["-e", "0"], kind: "structural-check", reporter: "exit", env: { PI861_REAL_MODEL_BUDGET: "3" } }] }),
+		/Real-service/,
+	);
 	await assert.rejects(runAcceptance({ workspace: path, expectedCommit: "0".repeat(40), checks: [check("x", ["--eval", "process.exit(0)"])] }), /commit/);
 });
 test("acceptance manifest schema rejects missing, unknown and smuggled fields", () => {
@@ -115,6 +125,10 @@ test("acceptance manifest schema rejects missing, unknown and smuggled fields", 
 	assert.throws(() => parseAcceptanceManifest({ ...base, suite: "production" }), /known suite/);
 	assert.throws(() => parseAcceptanceManifest({ ...base, requiredChecks: ["missing-id"] }), /not defined/);
 	assert.throws(() => parseAcceptanceManifest({ ...base, environmentNames: ["PI861_REAL_SEARCH_ACCEPTANCE"] }), /Real-service/);
+	assert.throws(
+		() => parseAcceptanceManifest({ ...base, checks: [{ ...base.checks[0], env: { PI861_REAL_SEARCH_BUDGET: "3" } }] }),
+		/Real-service authorization variables cannot be passed through acceptance configuration/,
+	);
 	assert.throws(() => parseAcceptanceManifest({ ...base, environmentNames: ["not a name"] }), /variable names/);
 	assert.throws(() => parseAcceptanceManifest({ ...base, extra: true }), /Unknown acceptance manifest field/);
 	assert.throws(() => parseAcceptanceManifest({ ...base, suite: "workers" }), /worker pair evidence/);
@@ -186,6 +200,21 @@ test("acceptance CLI rejects colliding or relative report paths before running c
 	}
 });
 
+// Review-1 D4 regression (attack A9): positional mode used to execute the default-closed
+// real-service scripts and record the deferred run as passed; both modes now refuse them
+// before any execution.
+test("acceptance CLI refuses real-service scripts in positional mode before executing", (t) => {
+	const path = workspace(t), config = join(path, "config.json"), output = join(path, "report.json");
+	writeFileSync(config, JSON.stringify({ workspace: path, checks: [check("real", ["scripts/real-acceptance/real-search.mjs"], { kind: "structural-check" })] }));
+	const cli = fileURLToPath(new URL("../scripts/run-acceptance.mjs", import.meta.url));
+	assert.throws(() => execFileSync(process.execPath, [cli, config, output], { env: cliEnv, stdio: "pipe" }), (error) => {
+		assert.match(String(error.stderr), /default-closed real-service scripts; positional configs cannot invoke them/);
+		return error.status === 1;
+	});
+	assert.equal(existsSync(output), false);
+	assert.equal(readFileSync(join(path, "artifact.txt"), "utf8"), "initial");
+});
+
 test("suite runner refuses missing manifests, suite mismatch and real-service scripts before executing", (t) => {
 	const path = workspace(t), manifestPath = join(path, "manifest.json"), evidencePath = join(path, "evidence.json");
 	writeFileSync(manifestPath, JSON.stringify({
@@ -208,6 +237,20 @@ test("suite runner refuses missing manifests, suite mismatch and real-service sc
 	}));
 	assert.throws(() => execFileSync(process.execPath, [cli, "--suite", "local", "--manifest", realServiceManifest, "--evidence", evidencePath], { env: cliEnv, stdio: "pipe" }), (error) => {
 		assert.match(String(error.stderr), /default-closed real-service scripts/);
+		return error.status === 1;
+	});
+	const armedManifest = join(path, "armed.json");
+	writeFileSync(armedManifest, JSON.stringify({
+		version: 1, suite: "local", workspace: path, requiredChecks: ["armed"], environmentNames: [],
+		checks: [{
+			id: "armed", command: process.execPath, args: ["-e", "console.log(process.env.PI861_REAL_SEARCH_ACCEPTANCE ?? 'unset')"],
+			kind: "structural-check", reporter: "exit", env: { PI861_REAL_SEARCH_ACCEPTANCE: "1", PI861_REAL_SEARCH_BUDGET: "3" },
+		}],
+	}));
+	// Review-1 D3 regression (attack A7): arming PI861_REAL_* through per-check env is rejected
+	// before any execution; the child process must never observe the values.
+	assert.throws(() => execFileSync(process.execPath, [cli, "--suite", "local", "--manifest", armedManifest, "--evidence", evidencePath], { env: cliEnv, stdio: "pipe" }), (error) => {
+		assert.match(String(error.stderr), /Real-service authorization variables cannot be passed through/);
 		return error.status === 1;
 	});
 	assert.equal(existsSync(evidencePath), false);

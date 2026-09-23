@@ -153,6 +153,10 @@ export function parseAcceptanceConfig(input: unknown): AcceptanceConfig {
 			for (const [key, value] of Object.entries(entries)) {
 				if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || typeof value !== "string")
 					throw new Error("Invalid check environment");
+				// Real-service opt-ins are set only by the operator running scripts/real-acceptance/*
+				// directly; they can never be armed through acceptance configs or suite manifests.
+				if (/^PI861_REAL_/.test(key))
+					throw new Error("Real-service authorization variables cannot be passed through acceptance configuration");
 				env[key] = value;
 			}
 		}
