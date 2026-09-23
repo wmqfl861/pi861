@@ -529,7 +529,11 @@ export class ModelRequestService {
 			});
 		} catch (error) {
 			this.blocked = true;
-			throw new ModelAccountingError(error);
+			// Fail closed; the cause keeps both the settlement failure and - when the transport
+			// also failed - the original transport failure, so neither error is lost (review N3).
+			throw new ModelAccountingError(
+				outcome === "failure" ? { settlementError: error, transportFailure: failure } : error,
+			);
 		}
 		if (outcome === "failure") throw failure;
 		return result!;

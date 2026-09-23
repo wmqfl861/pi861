@@ -128,7 +128,14 @@ export interface ModelRuntimeHooks<TContext = unknown, TResponse = unknown> {
 	isHealthy?: (target: ModelTarget, now: number) => boolean;
 	health?: SharedHealthService;
 	requests?: ModelRequestService;
-	/** Optional additional capacity authority. Settlement failures stop execution instead of being swallowed. */
+	/**
+	 * Legacy fallback ONLY for the basic host composition: when `requests` is absent the runtime
+	 * dispatches inference through this meter hook, and when both are absent dispatch is NOT
+	 * metered at all (the host's own RequestBudget remains the only admission gate). This is the
+	 * explicit unmetered-dispatch boundary (review N1): every production composition must inject
+	 * `requests` (meteringMode "service"); P3-I acceptance includes the negative that a runtime
+	 * wired without it reports meteringMode "unmetered" and therefore fails that gate.
+	 */
 	meter?: ModelRequestMeter;
 	strictClassifier?: boolean;
 	canDegrade?: (evidence: RouteEvidenceSummary) => boolean;
@@ -283,6 +290,16 @@ export class ModelRuntime<TContext, TResponse> {
 			cancelled: this.cancelled,
 			paused: this.paused,
 		};
+	}
+	/**
+	 * Dispatch metering discipline of THIS runtime instance (review N1 boundary):
+	 * "service" - every physical attempt is admitted and settled on the C3-backed
+	 * ModelRequestService; "legacy" - only the meter hook runs; "unmetered" - dispatch
+	 * bypasses model metering entirely (basic host composition only, never production).
+	 */
+	get meteringMode(): "service" | "legacy" | "unmetered" {
+		if (this.hooks.requests) return "service";
+		return this.hooks.meter ? "legacy" : "unmetered";
 	}
 	private persist(): void {
 		try {

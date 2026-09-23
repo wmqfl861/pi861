@@ -745,6 +745,28 @@ test("an escalated preferred model is never overridden by old-domain recovery", 
 	assert.ok(seen.every((id, index) => index === 0 || id !== "cheap"));
 });
 
+test("the dispatch metering mode boundary is explicit (review N1)", async (t) => {
+	const store = memoryStore(emptyUsageLedger());
+	const usage = usageService(store);
+	const requests = new ModelRequestService(usage);
+	const meter = { begin: () => {}, end: () => {} };
+	const infer = async (m) => m.id;
+	const probe = async () => true;
+	const service = new ModelRuntime(policy(), infer, probe, undefined, undefined, { requests });
+	const legacy = new ModelRuntime(policy(), infer, probe, undefined, undefined, { meter });
+	const unmetered = new ModelRuntime(policy(), infer, probe);
+	t.after(() => {
+		service.close();
+		legacy.close();
+		unmetered.close();
+	});
+	// Production compositions must inject hooks.requests; the other two modes exist only for the
+	// basic host composition and are the explicit unmetered-dispatch boundary P3-I gates against.
+	assert.equal(service.meteringMode, "service");
+	assert.equal(legacy.meteringMode, "legacy");
+	assert.equal(unmetered.meteringMode, "unmetered");
+});
+
 test("the runtime probe request budget bounds probe traffic", async (t) => {
 	let probeCalls = 0;
 	const runtime = new ModelRuntime(
