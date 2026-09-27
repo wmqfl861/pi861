@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-export type TaskStatus = "queued" | "running" | "review" | "done" | "blocked";
+export type TaskStatus = "queued" | "running" | "waiting" | "review" | "done" | "blocked" | "cancelled";
 export interface TaskSpec {
 	id: string;
 	title: string;
@@ -10,6 +10,12 @@ export interface TaskSpec {
 	acceptance: string[];
 	priority?: number;
 	retrySafe?: boolean;
+	/** Development can proceed before delivery dependencies are accepted; integration cannot. */
+	deliveryDependsOn?: string[];
+	/** Exclusive operator-defined ports, database schemas or test environment reservations. */
+	resources?: string[];
+	parentTaskId?: string;
+	reworkFor?: string;
 }
 export interface Lease {
 	taskId: string;
@@ -26,24 +32,37 @@ export interface TaskRecord extends TaskSpec {
 	evidence: string[];
 	reason?: string;
 }
-export interface BoardSnapshot { version: number; tasks: TaskRecord[]; }
-export interface BoardOptions { maxConcurrent: number; maxAttempts: number; }
+export interface BoardSnapshot {
+	version: number;
+	tasks: TaskRecord[];
+}
+export interface BoardOptions {
+	maxConcurrent: number;
+	maxAttempts: number;
+}
 
 /** Path reservations are coordination hints, not an OS sandbox. */
 export function normalizeScope(scope: string): string {
 	const normalized = scope.replaceAll("\\", "/").replace(/\/+$/, "");
 	if (normalized === ".") return ".";
-	if (!normalized || normalized.startsWith("/") || normalized.includes(":") ||
-		normalized.split("/").some((part) => !part || part === "." || part === "..")) {
+	if (
+		!normalized ||
+		normalized.startsWith("/") ||
+		normalized.includes(":") ||
+		normalized.split("/").some((part) => !part || part === "." || part === "..")
+	) {
 		throw new Error("Write scopes must be canonical repository-relative paths");
 	}
 	return normalized;
 }
 export function scopesConflict(left: string[], right: string[]): boolean {
-	return left.some((a) => right.some((b) => a === "." || b === "." ||
-		a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`)));
+	return left.some((a) =>
+		right.some((b) => a === "." || b === "." || a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`)),
+	);
 }
-function busy(task: TaskRecord): boolean { return task.status === "running" || task.status === "review"; }
+function busy(task: TaskRecord): boolean {
+	return task.status === "running" || task.status === "review";
+}
 
 /**
  * Synchronous single-writer coordinator. persist() must commit before returning.
@@ -53,28 +72,53 @@ export class TaskBoard {
 	private snapshot: BoardSnapshot;
 	private readonly options: BoardOptions;
 	private readonly persist: (snapshot: BoardSnapshot) => void;
-	constructor(options: BoardOptions, snapshot: BoardSnapshot = { version: 0, tasks: [] },
-		persist: (snapshot: BoardSnapshot) => void = () => {}) {
-		if (!Number.isSafeInteger(options.maxConcurrent) || options.maxConcurrent < 1 ||
-			!Number.isSafeInteger(options.maxAttempts) || options.maxAttempts < 1) throw new Error("Invalid task limits");
+	constructor(
+		options: BoardOptions,
+		snapshot: BoardSnapshot = { version: 0, tasks: [] },
+		persist: (snapshot: BoardSnapshot) => void = () => {},
+	) {
+		if (
+			!Number.isSafeInteger(options.maxConcurrent) ||
+			options.maxConcurrent < 1 ||
+			!Number.isSafeInteger(options.maxAttempts) ||
+			options.maxAttempts < 1
+		)
+			throw new Error("Invalid task limits");
 		this.options = { ...options };
 		if (!Number.isSafeInteger(snapshot.version) || snapshot.version < 0) throw new Error("Invalid board revision");
 		this.snapshot = structuredClone(snapshot);
 		this.persist = persist;
 		this.validate(this.snapshot.tasks);
 	}
-	get state(): BoardSnapshot { return structuredClone(this.snapshot); }
+	get state(): BoardSnapshot {
+		return structuredClone(this.snapshot);
+	}
 	private validate(tasks: TaskRecord[]): void {
 		const byId = new Map<string, TaskRecord>();
 		for (const task of tasks) {
-			if (!task.id || !task.title.trim() || byId.has(task.id) || !task.acceptance.length ||
+			if (
+				!task.id ||
+				!task.title.trim() ||
+				byId.has(task.id) ||
+				!task.acceptance.length ||
 				task.acceptance.some((item) => !item.trim()) ||
-				!Number.isSafeInteger(task.attempts) || task.attempts < 0 ||
-				!["queued", "running", "review", "done", "blocked"].includes(task.status)) {
+				!Number.isSafeInteger(task.attempts) ||
+				task.attempts < 0 ||
+				!["queued", "running", "waiting", "review", "done", "blocked", "cancelled"].includes(task.status)
+			) {
 				throw new Error("Invalid or duplicate task");
 			}
-			if (task.writeScopes.some((scope) => normalizeScope(scope) !== scope)) throw new Error("Noncanonical write scope");
-			if (busy(task) && (!task.lease || !Number.isFinite(task.leaseUntil))) throw new Error("Missing execution lease");
+			if (task.writeScopes.some((scope) => normalizeScope(scope) !== scope))
+				throw new Error("Noncanonical write scope");
+			if (task.resources?.some((resource) => !resource.trim() || resource.length > 200))
+				throw new Error("Invalid resource reservation");
+			if (
+				task.parentTaskId &&
+				(!tasks.some((parent) => parent.id === task.parentTaskId) || task.parentTaskId === task.id)
+			)
+				throw new Error("Invalid parent task");
+			if (busy(task) && (!task.lease || !Number.isFinite(task.leaseUntil)))
+				throw new Error("Missing execution lease");
 			byId.set(task.id, task);
 		}
 		const visiting = new Set<string>();
@@ -85,11 +129,11 @@ export class TaskBoard {
 			const task = byId.get(id);
 			if (!task) throw new Error(`Unknown dependency: ${id}`);
 			visiting.add(id);
-			task.dependsOn.forEach(visit);
+			[...task.dependsOn, ...(task.deliveryDependsOn ?? [])].forEach(visit);
 			visiting.delete(id);
 			visited.add(id);
 		};
-		tasks.forEach((task) => visit(task.id));
+		for (const task of tasks) visit(task.id);
 	}
 	private commit(tasks: TaskRecord[]): void {
 		this.validate(tasks);
@@ -99,19 +143,35 @@ export class TaskBoard {
 	}
 	add(specs: TaskSpec[]): void {
 		const records: TaskRecord[] = specs.map((spec) => ({
-			...structuredClone(spec), writeScopes: spec.writeScopes.map(normalizeScope),
-			status: "queued", attempts: 0, artifacts: [], evidence: [],
+			...structuredClone(spec),
+			writeScopes: spec.writeScopes.map(normalizeScope),
+			status: "queued",
+			attempts: 0,
+			artifacts: [],
+			evidence: [],
 		}));
 		this.commit([...structuredClone(this.snapshot.tasks), ...records]);
 	}
 	private owned(tasks: TaskRecord[], lease: Lease, now: number): TaskRecord {
 		const task = tasks.find((candidate) => candidate.id === lease.taskId);
-		if (!task || !busy(task) || task.lease?.token !== lease.token ||
-			task.lease.attempt !== lease.attempt || task.lease.workerId !== lease.workerId ||
-			(task.leaseUntil ?? 0) <= now) throw new Error("Stale or expired execution lease");
+		if (
+			!task ||
+			!busy(task) ||
+			task.lease?.token !== lease.token ||
+			task.lease.attempt !== lease.attempt ||
+			task.lease.workerId !== lease.workerId ||
+			(task.leaseUntil ?? 0) <= now
+		)
+			throw new Error("Stale or expired execution lease");
 		return task;
 	}
-	claim(workerId: string, capabilities: string[], now: number, leaseMs: number, allowedTaskIds?: string[]): TaskRecord | undefined {
+	claim(
+		workerId: string,
+		capabilities: string[],
+		now: number,
+		leaseMs: number,
+		allowedTaskIds?: string[],
+	): TaskRecord | undefined {
 		if (!workerId || !Number.isSafeInteger(leaseMs) || leaseMs <= 0 || !Number.isFinite(now)) {
 			throw new Error("Invalid worker or lease");
 		}
@@ -121,10 +181,20 @@ export class TaskBoard {
 			return undefined;
 		}
 		const done = new Set(tasks.filter((task) => task.status === "done").map((task) => task.id));
-		const ready = tasks.filter((task) => task.status === "queued" &&
-			task.attempts < this.options.maxAttempts && (allowedTaskIds === undefined || allowedTaskIds.includes(task.id)) && task.dependsOn.every((id) => done.has(id)) &&
-			task.capabilities.every((capability) => capabilities.includes(capability)) &&
-			!running.some((active) => scopesConflict(active.writeScopes, task.writeScopes)))
+		const ready = tasks
+			.filter(
+				(task) =>
+					task.status === "queued" &&
+					task.attempts < this.options.maxAttempts &&
+					(allowedTaskIds === undefined || allowedTaskIds.includes(task.id)) &&
+					task.dependsOn.every((id) => done.has(id)) &&
+					task.capabilities.every((capability) => capabilities.includes(capability)) &&
+					!running.some(
+						(active) =>
+							scopesConflict(active.writeScopes, task.writeScopes) ||
+							(task.resources ?? []).some((resource) => active.resources?.includes(resource)),
+					),
+			)
 			.sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0) || a.id.localeCompare(b.id));
 		const task = ready[0];
 		if (!task) return undefined;
@@ -156,6 +226,12 @@ export class TaskBoard {
 		const tasks = structuredClone(this.snapshot.tasks);
 		const task = this.owned(tasks, lease, now);
 		if (task.status !== "review") throw new Error("Task has not been submitted");
+		if (
+			!(task.deliveryDependsOn ?? []).every((id) =>
+				tasks.some((dependency) => dependency.id === id && dependency.status === "done"),
+			)
+		)
+			throw new Error("Delivery dependencies not accepted");
 		task.status = "done";
 		task.evidence = [...evidence];
 		delete task.lease;
@@ -178,13 +254,117 @@ export class TaskBoard {
 		for (const task of tasks) {
 			if (!busy(task) || (task.leaseUntil ?? 0) > now) continue;
 			task.status = task.retrySafe && task.attempts < this.options.maxAttempts ? "queued" : "blocked";
-			task.reason = task.status === "queued" ? "Lease expired; retry permitted" : "Execution outcome requires reconciliation";
+			task.reason =
+				task.status === "queued" ? "Lease expired; retry permitted" : "Execution outcome requires reconciliation";
 			delete task.lease;
 			delete task.leaseUntil;
 			recovered++;
 		}
 		if (recovered) this.commit(tasks);
 		return recovered;
+	}
+	/** Replace only queued contracts; graph validation and publication are atomic. */
+	revise(specs: TaskSpec[]): void {
+		const tasks = structuredClone(this.snapshot.tasks);
+		for (const spec of specs) {
+			const task = tasks.find((candidate) => candidate.id === spec.id);
+			if (!task || task.status !== "queued") throw new Error("Only queued tasks may be revised");
+			Object.assign(task, structuredClone(spec), { writeScopes: spec.writeScopes.map(normalizeScope) });
+		}
+		this.commit(tasks);
+	}
+	/** Waiting parents release their execution slot; all children still use this same board. */
+	waitForChildren(lease: Lease, children: TaskSpec[], now: number): void {
+		if (!children.length || children.some((child) => child.parentTaskId !== lease.taskId))
+			throw new Error("Children must name the waiting parent");
+		const tasks = structuredClone(this.snapshot.tasks);
+		const parent = this.owned(tasks, lease, now);
+		parent.status = "waiting";
+		parent.dependsOn = [...new Set([...parent.dependsOn, ...children.map((child) => child.id)])];
+		delete parent.lease;
+		delete parent.leaseUntil;
+		this.commit([
+			...tasks,
+			...children.map(
+				(child): TaskRecord => ({
+					...structuredClone(child),
+					status: "queued",
+					attempts: 0,
+					artifacts: [],
+					evidence: [],
+				}),
+			),
+		]);
+	}
+	wakeParents(): void {
+		const tasks = structuredClone(this.snapshot.tasks);
+		let changed = false;
+		for (const task of tasks) {
+			if (
+				task.status === "waiting" &&
+				task.dependsOn.every((id) => tasks.some((child) => child.id === id && child.status === "done"))
+			) {
+				task.status = "queued";
+				changed = true;
+			}
+		}
+		if (changed) this.commit(tasks);
+	}
+	cancel(reason: string): void {
+		const tasks = structuredClone(this.snapshot.tasks);
+		for (const task of tasks)
+			if (!["done", "cancelled"].includes(task.status)) {
+				task.status = "cancelled";
+				task.reason = reason;
+				delete task.lease;
+				delete task.leaseUntil;
+			}
+		this.commit(tasks);
+	}
+	/** A successful, independently validated repair satisfies its original delivery dependency. */
+	acceptRepair(originalId: string, evidence: string[]): void {
+		const tasks = structuredClone(this.snapshot.tasks);
+		const task = tasks.find((candidate) => candidate.id === originalId);
+		if (!task || task.status !== "blocked" || !evidence.length) throw new Error("No blocked repair target");
+		task.status = "done";
+		task.evidence = [...task.evidence, ...evidence];
+		delete task.reason;
+		this.commit(tasks);
+	}
+	/** Operator-driven unblock: the rework entry point for blocked work. The attempt budget is NOT reset — workspaces are keyed by attempt, and extra rework budget means raising maxAttempts. */
+	unblock(taskId: string, reason: string): void {
+		if (!taskId || !reason.trim()) throw new Error("Unblock requires a task and a reason");
+		const tasks = structuredClone(this.snapshot.tasks);
+		const task = tasks.find((candidate) => candidate.id === taskId);
+		if (!task) throw new Error(`Unknown task: ${taskId}`);
+		if (task.status !== "blocked") throw new Error("Only blocked work can be unblocked");
+		task.status = "queued";
+		task.reason = `Unblocked by operator: ${reason}`;
+		delete task.lease;
+		delete task.leaseUntil;
+		this.commit(tasks);
+	}
+	/**
+	 * Pause-style lease release: retry-safe work returns to the queue, unknown-outcome work requires reconciliation.
+	 * Unlike recoverExpired this ignores lease expiry (the caller paused on purpose) but still verifies lease ownership.
+	 */
+	relinquish(lease: Lease, reason: string, _now: number): void {
+		if (!reason.trim()) throw new Error("Relinquish requires a reason");
+		const tasks = structuredClone(this.snapshot.tasks);
+		const task = tasks.find((candidate) => candidate.id === lease.taskId);
+		if (
+			!task ||
+			!busy(task) ||
+			task.lease?.token !== lease.token ||
+			task.lease.attempt !== lease.attempt ||
+			task.lease.workerId !== lease.workerId
+		)
+			throw new Error("Stale execution lease");
+		task.status = task.retrySafe && task.attempts < this.options.maxAttempts ? "queued" : "blocked";
+		task.reason = task.status === "queued" ? `Requeued after pause: ${reason}` : `Paused mid-execution: ${reason}`;
+		delete task.lease;
+		delete task.leaseUntil;
+		this.commit(tasks);
 	}
 }
 
@@ -193,14 +373,19 @@ export interface Worker {
 	capabilities: string[];
 	run: (task: TaskRecord, signal: AbortSignal) => Promise<string[]>;
 }
-export interface Verification { accepted: boolean; evidence: string[]; reason?: string; }
+export interface Verification {
+	accepted: boolean;
+	evidence: string[];
+	reason?: string;
+}
 
 /**
  * Completion-driven refill: each independently verified result immediately unlocks dependencies.
  * Workers are injected; no claim that this class provides network transport or process isolation.
  */
 export async function drainReadyTasks(
-	board: TaskBoard, workers: Worker[],
+	board: TaskBoard,
+	workers: Worker[],
 	verify: (task: TaskRecord, artifacts: string[], signal: AbortSignal) => Promise<Verification>,
 	options: { signal: AbortSignal; leaseMs?: number; now?: () => number },
 ): Promise<BoardSnapshot> {
@@ -214,10 +399,16 @@ export async function drainReadyTasks(
 		if (!lease) throw new Error("Claim produced no lease");
 		const controller = new AbortController();
 		const signal = AbortSignal.any([options.signal, controller.signal]);
-		const timer = setInterval(() => {
-			try { board.heartbeat(lease, now(), leaseMs); }
-			catch (error) { controller.abort(error); }
-		}, Math.max(1, Math.floor(leaseMs / 3)));
+		const timer = setInterval(
+			() => {
+				try {
+					board.heartbeat(lease, now(), leaseMs);
+				} catch (error) {
+					controller.abort(error);
+				}
+			},
+			Math.max(1, Math.floor(leaseMs / 3)),
+		);
 		let abortListener: (() => void) | undefined;
 		const interrupt = new Promise<never>((_resolve, reject) => {
 			abortListener = () => reject(signal.reason);
@@ -232,10 +423,17 @@ export async function drainReadyTasks(
 			signal.throwIfAborted();
 			if (result.accepted) board.accept(lease, result.evidence, now());
 			else board.block(lease, result.reason ?? "Verification rejected", now());
-		} catch (error) {
+		} catch {
 			// Unknown worker failures are NOT automatically replayed: tools may already have run.
-			try { board.block(lease, signal.aborted ? "Interrupted; reconcile before retry" : "Worker or verifier failed", now()); }
-			catch (storageError) { errors.push(storageError); }
+			try {
+				board.block(
+					lease,
+					signal.aborted ? "Interrupted; reconcile before retry" : "Worker or verifier failed",
+					now(),
+				);
+			} catch (storageError) {
+				errors.push(storageError);
+			}
 		} finally {
 			clearInterval(timer);
 			if (abortListener) signal.removeEventListener("abort", abortListener);
@@ -246,8 +444,12 @@ export async function drainReadyTasks(
 			for (const worker of workers) {
 				if (running.has(worker.id)) continue;
 				let task: TaskRecord | undefined;
-				try { task = board.claim(worker.id, worker.capabilities, now(), leaseMs); }
-				catch (error) { errors.push(error); break; }
+				try {
+					task = board.claim(worker.id, worker.capabilities, now(), leaseMs);
+				} catch (error) {
+					errors.push(error);
+					break;
+				}
 				if (task) {
 					const promise = run(worker, task).finally(() => running.delete(worker.id));
 					running.set(worker.id, promise);

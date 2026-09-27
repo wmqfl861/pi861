@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.host-source.json",
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true
+  },
+  "include": [
+    "runtime.ts",
+    "index.ts",
+    "src/**/*.ts",
+    "examples/**/*.mjs",
+    "scripts/**/*.mjs",
+    "../../packages/*/src/**/*.d.ts",
+    "../../packages/session-backends/*/src/**/*.d.ts"
+  ]
+}

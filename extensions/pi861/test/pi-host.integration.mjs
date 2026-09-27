@@ -7,10 +7,32 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
+import { setTimeout as sleep } from "node:timers/promises";
 
-const cli = process.env.PI861_TEST_PI_CLI;
+/** Windows releases child working-directory handles slightly after process exit; retry a bounded number of times. */
+async function removeTree(path) {
+	for (let attempt = 0; attempt < 20; attempt++) {
+		try {
+			await rm(path, { recursive: true, force: true });
+			return;
+		} catch (error) {
+			if (!["EBUSY", "ENOTEMPTY", "EPERM"].includes(error?.code)) throw error;
+			await sleep(250);
+		}
+	}
+	await rm(path, { recursive: true, force: true });
+}
+const sourceHost = process.env.PI861_TEST_SOURCE_HOST === "1";
+const cli = sourceHost ? fileURLToPath(new URL("../../../packages/coding-agent/src/experimental/cli.ts", import.meta.url)) : process.env.PI861_TEST_PI_CLI;
+if (process.env.PI861_REQUIRE_HOST_TESTS === "1" && !cli) {
+	throw new Error("PI861_TEST_PI_CLI is required for host acceptance; a skipped host test is not a pass");
+}
 /** Optional JSON string array inserted before the CLI entry, e.g. a tsx source-host launch: ["<tsx>/cli.mjs","--tsconfig","<tsconfig>"]. */
 function launchPrefix() {
+	if (sourceHost) return [
+		fileURLToPath(new URL("../../../node_modules/tsx/dist/cli.mjs", import.meta.url)),
+		"--tsconfig", fileURLToPath(new URL("../../../tsconfig.json", import.meta.url)),
+	];
 	const raw = process.env.PI861_TEST_PI_LAUNCH_PREFIX;
 	if (!raw) return [];
 	const parsed = JSON.parse(raw);
@@ -117,6 +139,60 @@ test("real Pi: load extension, commands and memory without an LLM", { skip: !cli
 			killTimer = setTimeout(() => { if (!closed) child.kill("SIGKILL"); resolve(); }, 3000);
 		})]);
 		clearTimeout(killTimer);
-		await rm(directory, { recursive: true, force: true });
+		await removeTree(directory);
+	}
+});
+
+test("real Pi: loading the extension twice registers exactly one goal", { skip: !cli, timeout: Number(process.env.PI861_TEST_TIMEOUT_MS ?? 60_000) }, async () => {
+	const directory = await mkdtemp(join(tmpdir(), "pi861-host-dup-"));
+	const home = join(directory, "home");
+	await mkdir(home);
+	const extension = fileURLToPath(new URL("../index.ts", import.meta.url));
+	let output = "";
+	let closed = false;
+	const child = spawn(process.execPath, [...launchPrefix(), cli, "--mode", "rpc", "--no-session", "--no-skills", "-e", extension, "-e", extension], {
+		cwd: directory,
+		env: {
+			PATH: process.env.PATH ?? "", HOME: home, USERPROFILE: home,
+			XDG_CONFIG_HOME: join(home, ".config"), XDG_CACHE_HOME: join(home, ".cache"),
+			PI_CODING_AGENT_DIR: join(home, ".pi", "agent"),
+			PI861_AUTO_CAPTURE: "0", PI861_AUTO_RECALL: "0", PI861_WEB_SEARCH_ENABLED: "0",
+			PI861_PROJECT_ID: "host-dup", NO_COLOR: "1", LANG: "C.UTF-8",
+		},
+		stdio: ["pipe", "pipe", "pipe"],
+	});
+	const exited = new Promise((resolve) => child.once("exit", resolve));
+	child.stderr.resume();
+	child.stdout.setEncoding("utf8");
+	const reply = new Promise((resolve, reject) => {
+		const timer = setTimeout(() => reject(new Error("duplicate-load host did not answer get_commands")), 30_000);
+		child.stdout.on("data", (chunk) => {
+			output += chunk;
+			for (const line of output.split("\n")) {
+				if (!line.trim()) continue;
+				let message;
+				try { message = JSON.parse(line); } catch { continue; }
+				if (message.type === "response" && message.id === 1) {
+					clearTimeout(timer);
+					resolve(message);
+				}
+			}
+		});
+		setTimeout(() => child.stdin.write(`${JSON.stringify({ id: 1, type: "get_commands" })}\n`), 250);
+	});
+	try {
+		const message = await reply;
+		assert.equal(message.success, true);
+		const goals = message.data.commands.filter((command) => command.name === "goal");
+		assert.equal(goals.length, 1, `duplicate extension load must leave exactly one goal owner: ${JSON.stringify(message.data.commands.map((command) => command.name))}`);
+	} finally {
+		if (!closed) child.kill("SIGTERM");
+		let killTimer;
+		await Promise.race([exited, new Promise((resolve) => {
+			killTimer = setTimeout(() => { if (!closed) child.kill("SIGKILL"); resolve(); }, 3000);
+		})]);
+		clearTimeout(killTimer);
+		closed = true;
+		await removeTree(directory);
 	}
 });
