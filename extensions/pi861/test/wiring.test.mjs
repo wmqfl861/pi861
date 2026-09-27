@@ -9,6 +9,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { managedStream } from "../src/live/managed-stream.ts";
+import { StreamClaims } from "../src/live/stream-claims.ts";
+import { businessOperationId } from "../src/live/stream-bridge.ts";
 import { ModelRuntime } from "../src/live/model-runtime.ts";
 import {
 	emptyUsageLedger,
@@ -251,4 +253,110 @@ test("typed publication: the legacy publish signature is rejected and publish fa
 	} finally {
 		await rm(directory, { recursive: true, force: true });
 	}
+});
+
+test("C5 stream claims: business tools claim once, settle from the receipt, and lost receipts block until reconciliation", async () => {
+	const identity = { serviceId: "server-a", toolName: "deposit", accountId: "acct", resourceId: "res-1", schemaDigest: "sha" };
+	const registry = new Map([["pi861_mcp_fixture", { binding: null, identity }]]);
+	const claims = new StreamClaims(
+		(toolName) => {
+			const resolved = registry.get(toolName);
+			return resolved ? { identity: resolved.identity, business: true } : undefined;
+		},
+		(toolName) => ({ serviceId: "pi-host", toolName, accountId: "local", resourceId: toolName, schemaDigest: `d-${toolName}` }),
+	);
+	// Business identity: the same complete arguments map to one operation across attempts and call ids.
+	const first = claims.bind({ type: "toolCall", id: "call-1", name: "pi861_mcp_fixture", arguments: { amount: 5 } });
+	const second = claims.bind({ type: "toolCall", id: "call-2", name: "pi861_mcp_fixture", arguments: { amount: 5 } });
+	assert.equal(businessOperationId(first), businessOperationId(second));
+	// Native tools are per-call local intents: identical invocations never collide.
+	const writeA = claims.bind({ type: "toolCall", id: "w-1", name: "write", arguments: { path: "x" } });
+	const writeB = claims.bind({ type: "toolCall", id: "w-2", name: "write", arguments: { path: "x" } });
+	assert.notEqual(businessOperationId(writeA), businessOperationId(writeB));
+	// An unresolved capability name is refused before any claim.
+	assert.throws(
+		() => claims.bind({ type: "toolCall", id: "call-3", name: "pi861_mcp_missing", arguments: {} }),
+		/no active capability binding/,
+	);
+	// Dispatch, settle from the receipt, and confirm nothing blocks.
+	claims.ledger.prepare(businessOperationId(writeA), writeA.identity, writeA.inputDigest, 1);
+	claims.ledger.markDispatched(businessOperationId(writeA), 1);
+	assert.equal(claims.settle("w-1", { ok: true }, false), businessOperationId(writeA));
+	assert.equal(claims.unsettled(), 0);
+	// A lost receipt parks as unknown and blocks; reconciliation not-executed re-arms it.
+	claims.ledger.prepare(businessOperationId(writeB), writeB.identity, writeB.inputDigest, 2);
+	claims.ledger.markDispatched(businessOperationId(writeB), 2);
+	claims.markLostReceipts(3);
+	assert.equal(claims.unsettled(), 1);
+	assert.equal(claims.pending().length, 1);
+	claims.reconcile(businessOperationId(writeB), { status: "not-executed" }, 4);
+	assert.equal(claims.unsettled(), 0);
+	// Error receipts settle as failed and free the slot (fresh claim, after the sweep).
+	const failing = claims.bind({ type: "toolCall", id: "call-4", name: "pi861_mcp_fixture", arguments: { amount: 9 } });
+	claims.ledger.prepare(businessOperationId(failing), failing.identity, failing.inputDigest, 5);
+	claims.ledger.markDispatched(businessOperationId(failing), 5);
+	assert.equal(claims.settle("call-4", { error: "x" }, true), businessOperationId(failing));
+	assert.equal(claims.unsettled(), 0);
+	assert.equal(claims.ledger.get(businessOperationId(failing)).status, "failed");
+});
+
+test("C5 gate through the managed stream: an unsettled operation refuses the next model call until reconciled", async () => {
+	const identity = { serviceId: "s", toolName: "t", accountId: "a", resourceId: "r", schemaDigest: "h" };
+	const registry = new Map([["pi861_mcp_gated", { identity }]]);
+	const claims = new StreamClaims(
+		(toolName) => {
+			const resolved = registry.get(toolName);
+			return resolved ? { identity: resolved.identity, business: true } : undefined;
+		},
+		(toolName) => ({ serviceId: "pi-host", toolName, accountId: "local", resourceId: toolName, schemaDigest: "d" }),
+	);
+	let dispatchCount = 0;
+	const runtime = new ModelRuntime(
+		POLICY,
+		async (_target, request, signal, _onProgress, _onUsage, attempt) => {
+			const live = request.stream;
+			const message = fixtureMessage({
+				content: [{ type: "toolCall", id: "gate-1", name: "pi861_mcp_gated", arguments: { n: 1 } }],
+				stopReason: "toolUse",
+			});
+			live.attempt = attempt;
+			live.bridge.begin(attempt, signal);
+			live.bridge.push(attempt, { type: "start", partial: message });
+			live.bridge.push(attempt, { type: "done", reason: "toolUse", message });
+			dispatchCount++;
+			return message;
+		},
+		async () => true,
+	);
+	const { events, output } = collector();
+	const c5 = {
+		prepare: async () => claims.unsettled(),
+		wiring: { ledger: claims.ledger, bind: claims.bind },
+	};
+	const stream = managedStream(() => runtime, () => output, failureMessage, c5);
+	// First call: the committed tool is claimed and dispatched exactly once.
+	stream({ id: "managed" }, { messages: [] }, {});
+	await sleep(40);
+	assert.equal(dispatchCount, 1);
+	assert.ok(events.some((event) => event.type === "toolcall_end"));
+	const operationId = claims.ledger.exportState().operations.find((op) => op.status === "dispatched")?.operationId;
+	assert.ok(operationId, "the committed tool must hold a dispatched claim");
+	// The receipt never arrives; at turn end it parks unknown and the next call is refused.
+	claims.markLostReceipts();
+	assert.equal(claims.unsettled(), 1);
+	const second = collector();
+	const stream2 = managedStream(() => runtime, () => second.output, failureMessage, c5);
+	stream2({ id: "managed" }, { messages: [] }, {});
+	await sleep(40);
+	assert.equal(dispatchCount, 1, "no second model dispatch while an operation is unsettled");
+	assert.equal(second.events.at(-1).type, "error");
+	assert.match(second.events.at(-1).error.errorMessage, /reconcile pending operations first/);
+	// Trusted reconciliation re-arms dispatch.
+	claims.reconcile(operationId, { status: "not-executed" });
+	const third = collector();
+	const stream3 = managedStream(() => runtime, () => third.output, failureMessage, c5);
+	stream3({ id: "managed" }, { messages: [] }, {});
+	await sleep(40);
+	assert.equal(dispatchCount, 2);
+	assert.ok(third.events.some((event) => event.type === "done"));
 });

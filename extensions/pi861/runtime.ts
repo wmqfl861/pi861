@@ -21,6 +21,8 @@ import { GoalCommandService } from "./src/live/goal-command.ts";
 import { emptyLayeredMemory, LayeredMemory } from "./src/live/layered-memory.ts";
 import { type ManagedRequest, managedStream } from "./src/live/managed-stream.ts";
 import { attachMemoryGovernance } from "./src/live/memory-service.ts";
+import { type ResolvedBinding, StreamClaims } from "./src/live/stream-claims.ts";
+import { digest } from "./src/memory.ts";
 
 /** The full runtime's managed request shape bound to the real Pi transcript and stream options. */
 type WiringRequest = ManagedRequest<Context, ModelsSimpleStreamOptions>;
@@ -483,6 +485,87 @@ export default function runtimeExtension(pi: ExtensionAPI): void {
 	};
 	pi.on("session_start", initialize);
 	pi.on("session_tree", initialize);
+	// C5 stream discipline (P2-B wiring items 1-3): one ledger shared by every managed
+	// stream of this host; activated capability bindings resolve to stable business
+	// identities (blocking across attempts), native host tools settle per call.
+	const streamClaims = new StreamClaims(
+		(toolName) => {
+			const resolved = streamBindings.get(toolName);
+			return resolved ? ({ identity: resolved.identity, business: true } satisfies ResolvedBinding) : undefined;
+		},
+		(toolName) => ({
+			serviceId: "pi-host",
+			toolName,
+			accountId: tenantId,
+			resourceId: toolName,
+			schemaDigest: digest(toolName),
+		}),
+	);
+	const streamBindings = new Map<string, { binding: ToolBinding; identity: ResolvedBinding["identity"] }>();
+	let streamBindingsKey = "";
+	/** Re-resolves activated capability bindings from the persisted activation state via the repository's own plan port. */
+	async function refreshStreamBindings(): Promise<void> {
+		if (!context) return;
+		let saved: unknown;
+		for (const entry of context.sessionManager.getBranch()) {
+			const item = record(entry);
+			if (item?.type === "custom" && item.customType === "pi861.capabilities.v2") saved = item.data;
+		}
+		const key = digest(saved ?? "none");
+		if (key === streamBindingsKey) return;
+		streamBindingsKey = key;
+		streamBindings.clear();
+		if (!Array.isArray(saved)) return;
+		const role = currentRole();
+		for (const raw of saved) {
+			const value = record(raw);
+			const branches = Array.isArray(value?.branches) ? value.branches : undefined;
+			if (
+				!value ||
+				typeof value.skillId !== "string" ||
+				typeof value.revision !== "string" ||
+				!branches?.every((branch) => typeof branch === "string") ||
+				typeof value.phase !== "string"
+			)
+				continue;
+			try {
+				const planned = await repository.bindingPlan(
+					value.skillId,
+					value.revision,
+					branches,
+					value.phase,
+					role,
+					config.environment ?? [],
+				);
+				for (const binding of planned) {
+					const separator = binding.toolId.indexOf("/");
+					if (separator <= 0 || separator === binding.toolId.length - 1) continue;
+					// Tool names follow skills-host's documented bindingName formula; a
+					// formula change on the K side surfaces here as an unresolvable name.
+					const name = `pi861_mcp_${digest([value.skillId, value.revision, branches, value.phase, binding]).slice(0, 24)}`;
+					streamBindings.set(name, {
+						binding,
+						identity: {
+							serviceId: binding.toolId.slice(0, separator),
+							toolName: binding.toolId.slice(separator + 1),
+							accountId: binding.accountId,
+							resourceId: binding.resourceId,
+							schemaDigest: binding.schemaHash,
+						},
+					});
+				}
+			} catch {
+				// The activation is no longer authorized for this role: its tools must not resolve.
+			}
+		}
+	}
+	const streamC5 = {
+		prepare: async (): Promise<number> => {
+			await refreshStreamBindings();
+			return streamClaims.unsettled();
+		},
+		wiring: { ledger: streamClaims.ledger, bind: streamClaims.bind },
+	};
 	if (config.models) {
 		pi.registerProvider("pi861-runtime", {
 			baseUrl: "http://127.0.0.1/unused-pi861-route",
@@ -521,6 +604,7 @@ export default function runtimeExtension(pi: ExtensionAPI): void {
 					errorMessage:
 						error instanceof ModelFailure ? error.message : "Pi861 request stopped; inspect runtime state",
 				}),
+				streamC5,
 			),
 		});
 		pi.on("before_agent_start", (event) => {
@@ -668,6 +752,12 @@ export default function runtimeExtension(pi: ExtensionAPI): void {
 				? message.stopReason
 				: "ok";
 		pi.appendEntry("pi861.run-settled.v2", { outcome, timestamp: Date.now() });
+		const lostReceipts = streamClaims.markLostReceipts();
+		if (lostReceipts > 0)
+			ctx.ui.notify(
+				`${lostReceipts} tool receipt(s) lost; model dispatch pauses until /mcp resolve-stream`,
+				"warning",
+			);
 		// Captured input lands first, then bounded distillation over the authority's own
 		// job table (LayeredMemory in file mode; the P2-M reference fix is verified).
 		void flushUserStatements(ctx).then(() =>
@@ -675,6 +765,8 @@ export default function runtimeExtension(pi: ExtensionAPI): void {
 		);
 	});
 	pi.on("tool_execution_end", async (event, ctx) => {
+		// C5 settlement from the real receipt (P2-B wiring item 3).
+		streamClaims.settle(event.toolCallId, event.result, event.isError === true);
 		if (
 			config.memory?.autoCapture === false ||
 			event.toolName.startsWith("pi861_memory") ||
@@ -724,7 +816,8 @@ export default function runtimeExtension(pi: ExtensionAPI): void {
 		},
 	});
 	pi.registerCommand("mcp", {
-		description: "refresh SERVER: discover metadata and publish its deterministic resource-bound Skill",
+		description:
+			"refresh SERVER | operations | resolve ID EVIDENCE | stream-pending | resolve-stream OP not-executed|succeeded|failed",
 		handler: async (args, ctx) => {
 			const [verb, serverId, ...details] = args.trim().split(/\s+/);
 			if (verb === "operations") {
@@ -734,6 +827,27 @@ export default function runtimeExtension(pi: ExtensionAPI): void {
 			if (verb === "resolve" && serverId) {
 				await operations.resolve(currentRole().id, serverId, details.join(" "));
 				ctx.ui.notify("Reconciliation recorded; a new explicitly intended operation may now run", "info");
+				return;
+			}
+			if (verb === "stream-pending") {
+				ctx.ui.notify(JSON.stringify(streamClaims.pending()), "info");
+				return;
+			}
+			if (verb === "resolve-stream" && serverId) {
+				const outcome = details[0];
+				if (outcome === "not-executed") streamClaims.reconcile(serverId, { status: "not-executed" });
+				else if (outcome === "succeeded")
+					streamClaims.reconcile(serverId, {
+						status: "succeeded",
+						resultDigest: digest(details.slice(1).join(" ")),
+					});
+				else if (outcome === "failed")
+					streamClaims.reconcile(serverId, {
+						status: "failed",
+						error: details.slice(1).join(" ") || "Operator reconciled failure",
+					});
+				else throw new Error("Usage: resolve-stream <operationId> <not-executed|succeeded|failed> [detail]");
+				ctx.ui.notify("Stream operation reconciled; model dispatch may resume", "info");
 				return;
 			}
 			if (verb !== "refresh" || !serverId) {

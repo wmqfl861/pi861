@@ -15,6 +15,8 @@ function launchPrefix(){if(sourceHost)return[fileURLToPath(new URL("../../../nod
 if(!Array.isArray(parsed)||parsed.some(part=>typeof part!=="string"))throw new Error("PI861_TEST_PI_LAUNCH_PREFIX must be a JSON array of strings");return parsed;}
 /** Windows releases child working-directory handles slightly after process exit; retry a bounded number of times. */
 async function removeTree(path){for(let attempt=0;attempt<20;attempt++){try{await rm(path,{recursive:true,force:true});return}catch(error){if(!["EBUSY","ENOTEMPTY","EPERM"].includes(error?.code))throw error;await sleep(250)}}await rm(path,{recursive:true,force:true});}
+/** The host fires tool_execution_end without awaiting the extension's async capture; poll bounded for durable writes. */
+async function waitFor(accept,label,attempts=50){for(let attempt=0;attempt<attempts;attempt++){if(await accept())return;await sleep(100)}assert.fail(label)}
 const timeoutMs=Number(process.env.PI861_TEST_TIMEOUT_MS??60000);
 test("real Pi runtime: incremental managed model, C3 metered failover, governed memory, no whole-block snapshots",{skip:!cli,timeout:timeoutMs},async()=>{
  const root=await mkdtemp(join(tmpdir(),"pi861-live-host-"));let session;
@@ -45,16 +47,15 @@ test("real Pi runtime: incremental managed model, C3 metered failover, governed 
  assert.equal(ledger.records.every(r=>r.reservationId),true);
  // Wiring acceptance: memory capture runs through governance; whole-snapshot entries are gone.
  assert.equal(entries.entries.filter(e=>e.customType==="pi861.memory.v1").length,0,"whole-block memory JSON entries must not be written");
- const governed=JSON.parse(await readFile(join(state,"memory.json"),"utf8"));
- assert.ok(governed.memory.items.some(x=>x.full&&x.full.includes('"tool":"write"')),"tool execution must be captured by memory governance");
+ await waitFor(async()=>{try{const governed=JSON.parse(await readFile(join(state,"memory.json"),"utf8"));return governed.memory?.items?.some(x=>x.full&&x.full.includes('"tool":"write"'))}catch{return false}},"tool execution must be captured by memory governance");
  await session.command("prompt",{message:"/remember durable-native-host-marker"},signal);
  await session.command("prompt",{message:"/memory-maintain"},signal);
- const saved=JSON.parse(await readFile(join(state,"memory.json"),"utf8"));assert.ok(saved.memory.items.some(x=>x.full==="durable-native-host-marker"));
+ await waitFor(async()=>{try{const saved=JSON.parse(await readFile(join(state,"memory.json"),"utf8"));return saved.memory?.items?.some(x=>x.full==="durable-native-host-marker")}catch{return false}},"explicit /remember must persist in the governed authority");
  await session.close();session=undefined;
  session=new PiRpcSession({...processSpec,env:{...env,PI861_FIXTURE_FAIL:"0"}},{waitForSettled:true});
  await session.prompt("Find durable-native-host-marker in prior memory",signal);
  const calls=(await readFile(join(root,"calls.jsonl"),"utf8")).trim().split("\n").map(JSON.parse);assert.ok(calls.some(c=>c.model==="strong"));
- const persisted=JSON.parse(await readFile(join(state,"memory.json"),"utf8"));assert.ok(persisted.memory.items.some(x=>x.full==="durable-native-host-marker"));
+ await waitFor(async()=>{try{const persisted=JSON.parse(await readFile(join(state,"memory.json"),"utf8"));return persisted.memory?.items?.some(x=>x.full==="durable-native-host-marker")}catch{return false}},"the remembered marker must survive the host restart");
  }finally{await session?.close();await removeTree(root);}
 });
 test("real Pi runtime: loading the full runtime twice keeps exactly one goal owner",{skip:!cli,timeout:timeoutMs},async()=>{
