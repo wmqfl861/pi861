@@ -92,3 +92,17 @@ test("withdrawal also suppresses paraphrases from the exact same old source", as
 test("malformed stored data fails before becoming an active store", () => {
 	assert.throws(() => new LocalMemory(principal, { tenantId: "t1", items: "bad", receipts: [], tombstones: [] }), /snapshot/);
 });
+test("short records may omit summary segments; readers fall back to the full text", async () => {
+	const store = new LocalMemory(principal);
+	await store.put(write("r1", { full: "short note", abstract: "", overview: "" }));
+	const item = await store.get("project:p1", "m1");
+	for (const level of [0, 1, 2]) {
+		const packed = contextPack([item], { level, maxBytes: 2048 });
+		assert.equal(JSON.parse(packed.text).content, "short note");
+	}
+});
+test("long records still require both summary segments", async () => {
+	const store = new LocalMemory(principal);
+	await assert.rejects(store.put(write("r1", { full: "x".repeat(2001), abstract: "", overview: "" })), /Invalid memory write/);
+	await assert.rejects(store.put(write("r2", { full: "x".repeat(2001), abstract: "present", overview: "" })), /Invalid memory write/);
+});

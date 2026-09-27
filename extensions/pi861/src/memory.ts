@@ -1,5 +1,7 @@
-import { createHash } from "node:crypto";
+import { canonical, digest } from "./contracts/hash.ts";
+import { isValidScope } from "./contracts/identity.ts";
 
+export { canonical, digest };
 export type MemoryKind = "constraint" | "working" | "project" | "experience" | "evidence";
 export interface MemoryPrincipal {
 	tenantId: string;
@@ -14,7 +16,9 @@ export interface MemoryInput {
 	abstract: string;
 	overview: string;
 	full: string;
-	source: { kind: "user" | "tool" | "inference" | "recall"; ref: string };
+	// "verified" aligns with the C6 source chain: the type accepts it, but only trusted
+	// wiring (integration phase) may mint it; nothing in this kernel creates verified sources.
+	source: { kind: "user" | "tool" | "inference" | "verified" | "recall"; ref: string };
 	status: "candidate" | "confirmed";
 }
 export interface MemoryItem extends Omit<MemoryInput, "status"> {
@@ -40,23 +44,6 @@ export interface MemoryBackend {
 	put(input: MemoryWrite): Promise<MemoryReceipt>;
 	withdraw(requestId: string, scope: string, id: string, expectedRevision: number): Promise<MemoryReceipt>;
 }
-export function canonical(value: unknown): string {
-	if (value === null) return "null";
-	if (typeof value === "string" || typeof value === "boolean") return JSON.stringify(value);
-	if (typeof value === "number" && Number.isFinite(value)) return JSON.stringify(value);
-	if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
-	if (value && typeof value === "object" && Object.getPrototypeOf(value) === Object.prototype) {
-		const object = value as Record<string, unknown>;
-		return `{${Object.keys(object)
-			.sort()
-			.map((key) => `${JSON.stringify(key)}:${canonical(object[key])}`)
-			.join(",")}}`;
-	}
-	throw new Error("Only finite, plain JSON is accepted");
-}
-export function digest(value: unknown): string {
-	return createHash("sha256").update(canonical(value)).digest("hex");
-}
 export function contentFingerprint(item: Pick<MemoryInput, "scope" | "full">): string {
 	return digest({ scope: item.scope, full: item.full.trim().replace(/\s+/g, " ") });
 }
@@ -67,17 +54,21 @@ export function checkPrincipal(principal: MemoryPrincipal): void {
 	if (
 		!principal.tenantId ||
 		!principal.principalId ||
-		!principal.readScopes.every((scope) => /^[a-z]+:[^*:\s]+$/.test(scope)) ||
+		!principal.readScopes.every(isValidScope) ||
 		!principal.writeScopes.every((scope) => principal.readScopes.includes(scope))
 	) {
 		throw new Error("Invalid memory principal");
 	}
 }
+/** Records at or below this size may omit abstract/overview: a short record is its own summary at every depth. */
+export const SHORT_RECORD_FULL_BYTES = 2000;
 export function requireWrite(principal: MemoryPrincipal, scope: string): void {
 	if (!principal.writeScopes.includes(scope)) throw new Error("Memory scope not authorized");
 }
 export function validateMemory(input: MemoryWrite): void {
 	const item = input.item;
+	// Long records still require both summary segments: they are the L0/L1 access path.
+	const short = Buffer.byteLength(item.full, "utf8") <= SHORT_RECORD_FULL_BYTES;
 	if (
 		!input.requestId ||
 		input.requestId.length > 200 ||
@@ -86,12 +77,11 @@ export function validateMemory(input: MemoryWrite): void {
 		!item.scope ||
 		!item.full.trim() ||
 		Buffer.byteLength(item.full, "utf8") > 262_144 ||
-		!item.abstract.trim() ||
-		!item.overview.trim() ||
+		(!short && (!item.abstract.trim() || !item.overview.trim())) ||
 		!item.source.ref.trim() ||
 		!["constraint", "working", "project", "experience", "evidence"].includes(item.kind) ||
 		!["candidate", "confirmed"].includes(item.status) ||
-		!["user", "tool", "inference", "recall"].includes(item.source.kind) ||
+		!["user", "tool", "inference", "verified", "recall"].includes(item.source.kind) ||
 		(input.expectedRevision !== null && (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1))
 	) {
 		throw new Error("Invalid memory write");
@@ -274,7 +264,13 @@ export function contextPack(
 	let omitted = 0;
 	for (const item of items) {
 		if (item.status === "withdrawn" || (options.confirmedOnly && item.status !== "confirmed")) continue;
-		const body = options.level === 0 ? item.abstract : options.level === 1 ? item.overview : item.full;
+		// A missing segment on a short record falls back to the full text instead of packing an empty body.
+		const body =
+			options.level === 0
+				? item.abstract || item.full
+				: options.level === 1
+					? item.overview || item.full
+					: item.full;
 		const line = JSON.stringify({
 			id: item.id,
 			scope: item.scope,
