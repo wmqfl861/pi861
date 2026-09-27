@@ -98,7 +98,7 @@ export async function startPg17Fixture(options = {}) {
 		const portOutput = await docker("port", containerName, "5432");
 		const port = Number(/127\.0\.0\.1:(\d+)/.exec(portOutput.stdout)?.[1] ?? Number.NaN);
 		if (!Number.isSafeInteger(port) || port <= 0) throw new Error(`Could not determine the fixture port mapping: ${portOutput.stdout.trim()}`);
-		const versionOutput = await docker("exec", containerName, "psql", "-U", migrator, "-d", database, "-tAc", "SELECT server_version_num");
+		const versionOutput = await docker("exec", containerName, "psql", "-U", migrator, "-d", database, "-tAc", "SHOW server_version_num");
 		const serverVersionNum = Number(versionOutput.stdout.trim());
 		const fixture = {
 			containerName,
