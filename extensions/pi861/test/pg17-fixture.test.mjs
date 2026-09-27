@@ -49,3 +49,24 @@ test("opted-in environments get a real restricted PostgreSQL 17 container", { sk
 	assert.deepEqual(Object.keys(fixture.migrationEnv).sort(), ["PI861_TEST_PG_DATABASE", "PI861_TEST_PG_HOST", "PI861_TEST_PG_MIGRATION_PASSWORD", "PI861_TEST_PG_MIGRATION_USER", "PI861_TEST_PG_PORT"]);
 	assert.notEqual(fixture.connectionEnv.PI861_TEST_PG_USER, fixture.migrationEnv.PI861_TEST_PG_MIGRATION_USER);
 });
+
+test("five consecutive real-container fixture startups all pass (p1q review-2 N1 race regression)", { skip: false }, async () => {
+	if (!pg17OptedIn()) {
+		// Default environment: the race regression needs fresh containers; nothing here
+		// reports a pass of the real database when the opt-in is absent.
+		return;
+	}
+	// The readiness race (review-2 N1) fired at fixture STARTUP - waitForReady mistook the
+	// image's temporary initdb server for ready and CREATE ROLE failed in the restart gap.
+	// Five fresh-volume startups (each with its own initdb window) must all come up clean.
+	for (let attempt = 1; attempt <= 5; attempt++) {
+		const fixture = await startPg17Fixture();
+		try {
+			assert.ok(fixture.serverVersionNum >= 170000 && fixture.serverVersionNum < 180000, `attempt ${attempt}: server_version_num ${fixture.serverVersionNum}`);
+			assert.equal(fixture.assertVersion17(), true, `attempt ${attempt}: version gate`);
+			assert.equal(await fixture.runtimeRoleIsRestricted(), true, `attempt ${attempt}: restricted runtime role`);
+		} finally {
+			await fixture.stop();
+		}
+	}
+});
