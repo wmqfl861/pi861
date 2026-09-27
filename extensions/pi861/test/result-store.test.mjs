@@ -249,3 +249,45 @@ test("durable references survive a raw authority distillation pass (review-1 F1 
 		(error) => error.message,
 	), "Result not found");
 });
+
+test("store tolerates an unreadable authority: probes degrade to writes and puts adjudicate (review-1 F2-R1)", async (t) => {
+	const { memory } = durableSetup(t);
+	// Backend whose reads all fail (full outage read side) while writes pass.
+	// The governance wiring layers the pending queue on top of put, so at unit
+	// level the contract is: store() must not leak the get error; the writes
+	// proceed and the idempotent puts (deterministic requestId + content) win.
+	const blinded = new PersistentResultStore(
+		{
+			get: () => Promise.reject(new Error("connection lost")),
+			put: (input) => memory.put(input),
+			withdraw: (requestId, scope, id, revision) => memory.withdraw(requestId, scope, id, revision),
+		},
+		{ scopes: ["project:p"], pageSize: 128_000 },
+	);
+	const payload = "f".repeat(80_000);
+	const reference = await blinded.store(payload, "role:worker-a", {
+		kind: "tool",
+		scope: "project:p",
+		tool: "web.read",
+		sourceComplete: true,
+	});
+	// A healthy reader resolves what the blinded writer committed.
+	const healthy = new PersistentResultStore(memory, { scopes: ["project:p"], pageSize: 128_000 });
+	let text = "";
+	for (let offset = 0; ; ) {
+		const page = await healthy.read(reference.resultRef, "role:worker-a", offset);
+		text += page.text;
+		offset = page.nextOffset;
+		if (page.complete) break;
+	}
+	assert.equal(text, payload);
+	// Idempotent re-store through the same blinded backend replays the same
+	// reference without leaking the get error either.
+	const again = await blinded.store(payload, "role:worker-a", {
+		kind: "tool",
+		scope: "project:p",
+		tool: "web.read",
+		sourceComplete: true,
+	});
+	assert.equal(again.resultRef, reference.resultRef);
+});

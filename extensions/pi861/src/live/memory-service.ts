@@ -184,7 +184,9 @@ export class MemoryGovernance {
 		// Reference chunk and manifest writes go through the same bounded pending
 		// queue as every other capture: during an authority outage they park as
 		// checkpoint-uncommitted entries instead of surfacing raw connection
-		// errors, and the host pause boundary holds for oversized captures too.
+		// errors, and the host pause boundary holds for oversized captures too -
+		// including a full outage where reads fail as well, because the store's
+		// existence probes are advisory and the pending-queue put adjudicates.
 		this.results = new PersistentResultStore(
 			{
 				get: (scope, id) => options.authority.get(scope, id),

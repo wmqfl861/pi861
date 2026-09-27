@@ -303,8 +303,11 @@ test("governance over real PostgreSQL: assembly, references, withdrawal, receipt
 
 	await t.test("authority outage parks writes locally and flush replays to the real database", async () => {
 		let down = false;
+		// Full-outage shape: reads fail too, not just writes. The oversized
+		// capture must still park with the checkpoint signal - the store's
+		// existence probes are advisory and the pending-queue put adjudicates.
 		const gated = {
-			get: (s, id) => sessionA.get(s, id),
+			get: (s, id) => (down ? Promise.reject(new Error("connection lost")) : sessionA.get(s, id)),
 			put: (input) => (down ? Promise.reject(new Error("connection lost")) : sessionA.put(input)),
 			withdraw: (requestId, s, id, revision) => sessionA.withdraw(requestId, s, id, revision),
 			assemble: (options) => sessionA.memory.assemble(options),
@@ -343,6 +346,7 @@ test("governance over real PostgreSQL: assembly, references, withdrawal, receipt
 		});
 		assert.equal(bigFailed.status, "failed");
 		assert.match(bigFailed.error, /checkpoint uncommitted/);
+		assert.ok(!bigFailed.error.includes("connection lost"), `raw error leaked: ${bigFailed.error}`);
 		const parked = JSON.parse(await readFile(join(pendingDir, "outage-pending.json"), "utf8"));
 		assert.ok(parked.entries.length >= 2, "both the statement and the chunk parked uncommitted");
 		assert.ok(parked.entries.every((entry) => entry.state === "uncommitted"));

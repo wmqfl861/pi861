@@ -272,6 +272,10 @@ export class PersistentResultStore {
 	 * that carries the descriptor in its `full` body (projection-safe). The
 	 * manifest is written last: it is the commit point, so a partial write is
 	 * invisible to readers and re-stores fill in missing chunks idempotently.
+	 * Existence probes are advisory only: when the authority is fully down the
+	 * probes degrade to "write it" and the pending-queue put (deterministic
+	 * requestId and content, idempotent replay) adjudicates - the capture parks
+	 * as checkpoint-uncommitted instead of leaking the raw connection error.
 	 */
 	async store(text: string, owner: string, descriptor: ResultDescriptor): Promise<StoredResultReference> {
 		if (!owner) throw new Error("Result owner identity required");
@@ -288,7 +292,7 @@ export class PersistentResultStore {
 			lengths: chunks.map((chunk) => chunk.length),
 		};
 		const manifestId = manifestIdentity(owner, resultRef);
-		const manifest = await this.backend.get(descriptor.scope, manifestId);
+		const manifest = await this.probe(descriptor.scope, manifestId);
 		if (manifest) {
 			const existing = storedDescriptor(manifest);
 			if (!existing || existing.reference.resultRef !== resultRef)
@@ -297,7 +301,7 @@ export class PersistentResultStore {
 		}
 		for (const [index, chunk] of chunks.entries()) {
 			const id = chunkIdentity(owner, resultRef, index);
-			const existing = await this.backend.get(descriptor.scope, id);
+			const existing = await this.probe(descriptor.scope, id);
 			if (existing) continue;
 			const item = {
 				id,
@@ -400,9 +404,25 @@ export class PersistentResultStore {
 		return withdrawn;
 	}
 
+	/**
+	 * Advisory existence probe on the capture write path. A failed probe means
+	 * "unknown", never "absent" and never a leaked transport error: the writes
+	 * proceed and the idempotent pending-queue put adjudicates, so a full
+	 * authority outage (get and put both down) parks the capture as
+	 * checkpoint-uncommitted exactly like every other capture path. Read-side
+	 * resolution (locate/mustRead) stays strict - reads have nothing to park
+	 * and must fail loud.
+	 */
+	private async probe(scope: string, id: string): Promise<MemoryItem | undefined> {
+		try {
+			return await this.backend.get(scope, id);
+		} catch {
+			return undefined;
+		}
+	}
+
 	/** Resolves the manifest record; only its `full` body and the record identity are trusted. */
-	private async locate(
-		resultRef: string,
+	private async locate(		resultRef: string,
 		owner: string,
 	): Promise<{ scope: string; descriptor: ResultDescriptor; lengths: number[] }> {
 		if (!resultRef || !owner) throw new Error("Result not found");

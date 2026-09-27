@@ -45,14 +45,17 @@ function setup(t, options = {}) {
 }
 
 /** Authority proxy whose put fails while the link is down; every other method passes through. */
-function gatedAuthority(memory) {
+function gatedAuthority(memory, options = {}) {
 	let down = false;
 	return {
 		memory,
 		setDown(value) {
 			down = value;
 		},
-		get: (s, id) => memory.get(s, id),
+		get: (s, id) => {
+			if (down && options.gateGet) return Promise.reject(new Error("simulated connection failure"));
+			return memory.get(s, id);
+		},
 		put: (input) => {
 			if (down) return Promise.reject(new Error("simulated connection failure"));
 			return memory.put(input);
@@ -257,6 +260,56 @@ test("oversized captures park through the pending queue during an authority outa
 	const retried = await governance.captureToolExecutionEnd({
 		sessionId: "s1",
 		toolCallId: "call-outage",
+		toolName: "web.read",
+		result: payload,
+	});
+	assert.equal(retried.status, "referenced");
+	const resultRef = JSON.parse((await memory.get(scope, retried.id)).full).resultRef;
+	let text = "";
+	for (let offset = 0; ; ) {
+		const page = await governance.readResultReference(resultRef, offset);
+		text += page.text;
+		offset = page.nextOffset;
+		if (page.complete) break;
+	}
+	assert.equal(JSON.parse(text).result, payload);
+});
+
+test("oversized captures park under a full outage where reads fail too (review-1 F2-R1)", async (t) => {
+	const dir = mkdtempSync(join(tmpdir(), "pi861-governance-outage-full-"));
+	t.after(() => rmSync(dir, { recursive: true, force: true }));
+	const memory = new LayeredMemory(
+		new FileStateStore(join(dir, "memory.json"), emptyLayeredMemory("t")),
+		principal,
+	);
+	const gate = gatedAuthority(memory, { gateGet: true });
+	const pendingStore = new FileStateStore(join(dir, "pending.json"), { version: 1, entries: [] });
+	const governance = attachMemoryGovernance({}, { authority: gate, pending: pendingStore, scope, resultPageSize: 128_000 });
+	gate.setDown(true);
+	const payload = JSON.stringify({ tool: "web.read", result: "n".repeat(80_000), isError: false });
+	const outcome = await governance.captureToolExecutionEnd({
+		sessionId: "s1",
+		toolCallId: "call-outage-full",
+		toolName: "web.read",
+		result: payload,
+	});
+	// The store's existence probes are advisory: a failing get degrades to
+	// "write it" and the pending-queue put adjudicates, so the capture parks
+	// with the checkpoint signal instead of leaking the raw connection error.
+	assert.equal(outcome.status, "failed");
+	assert.match(outcome.error, /checkpoint uncommitted/);
+	assert.ok(!outcome.error.includes("simulated connection failure"), `raw error leaked: ${outcome.error}`);
+	const parked = JSON.parse(readFileSync(join(dir, "pending.json"), "utf8"));
+	assert.ok(parked.entries.length >= 1, "the chunk write parked as uncommitted");
+	assert.ok(parked.entries.every((entry) => entry.state === "uncommitted"));
+	// Recovery: flush replays the parked chunk, the idempotent retry completes
+	// manifest and descriptor, and the payload reads back in full.
+	gate.setDown(false);
+	const flushed = await governance.flushPending();
+	assert.equal(flushed.committed, parked.entries.length);
+	const retried = await governance.captureToolExecutionEnd({
+		sessionId: "s1",
+		toolCallId: "call-outage-full",
 		toolName: "web.read",
 		result: payload,
 	});
