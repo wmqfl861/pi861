@@ -1,7 +1,13 @@
 import type { Attempt } from "../routing.ts";
 import { record } from "../search.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
-import { AttemptStreamBridge, type BridgeEvent, type StreamMessage } from "./stream-bridge.ts";
+import {
+	AttemptStreamBridge,
+	type BindTool,
+	type BridgeEvent,
+	type OperationDispatchPort,
+	type StreamMessage,
+} from "./stream-bridge.ts";
 
 /**
  * H-owned managed-provider adapter. The buffered wrapper that waited for a whole
@@ -33,6 +39,17 @@ export interface ManagedStreamOutput {
 }
 
 /**
+ * C5 stream wiring (P2-B delivery section 7, items 1-3). `prepare` refreshes the bind
+ * resolver (activation registry) and returns the count of unsettled operations; the
+ * count both gates the model call (ModelRuntime refuses to dispatch while operations
+ * await settlement or reconciliation) and the stream commit.
+ */
+export interface ManagedStreamC5 {
+	prepare(): Promise<number>;
+	wiring: { ledger: OperationDispatchPort; bind: BindTool };
+}
+
+/**
  * Builds the streamSimple entry for the "pi861-runtime" provider registration.
  * `failureMessage` renders the single terminal error the host emits on failure.
  * The output type is generic so the caller can bind the real event-stream class.
@@ -45,6 +62,7 @@ export function managedStream<
 	runtime: () => ModelRuntime<ManagedRequest<TTranscript, TOptions>, ManagedMessage> | undefined,
 	createOutput: () => TOutput,
 	failureMessage: (error: unknown, reason: "error" | "aborted") => ManagedMessage,
+	c5?: ManagedStreamC5,
 ): (_model: unknown, transcript: TTranscript, options?: TOptions) => TOutput {
 	return (_model, transcript, options) => {
 		const output = createOutput();
@@ -60,19 +78,22 @@ export function managedStream<
 						Boolean(tool.name) &&
 						record(tool.arguments) !== null &&
 						!Array.isArray(tool.arguments),
+					c5?.wiring,
 				),
 			};
 			try {
 				const live = runtime();
 				if (!live) throw new Error("Model runtime not initialized");
+				const pending = c5 ? await c5.prepare() : 0;
 				const message = await live.call(
 					{ transcript, options, stream },
 					options?.signal ?? new AbortController().signal,
+					pending,
 				);
 				if (!["stop", "length", "toolUse"].includes(message.stopReason ?? "")) {
 					throw new Error("Managed model returned an unresolved stop reason");
 				}
-				if (!stream.attempt || !stream.bridge.commit(stream.attempt, 0))
+				if (!stream.attempt || !stream.bridge.commit(stream.attempt, pending))
 					throw new Error("Managed stream ended without a committable attempt");
 			} catch (error) {
 				stream.bridge.cancel();
