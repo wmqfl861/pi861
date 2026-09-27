@@ -43,16 +43,19 @@ test("AX registry covers AX1-AX10 with fixtures, criteria and boundaries", () =>
 	}
 });
 
-test("known boundaries stay attached: PG17 gates and BLOCKED-BY-P2M-F1", () => {
+test("known boundaries stay attached: PG17 gates and the reference+refine status note", () => {
 	for (const id of ["AX7", "AX8", "AX10"]) {
 		const scenario = scenarioById(id);
 		assert.ok(
 			scenario.boundaries.some((boundary) => boundary.includes("PostgreSQL 17") || boundary.includes("PI861_PG17_TESTS")),
 			`${id} must keep its PG17 container boundary`,
 		);
+		// The reference+refine combination was BLOCKED-BY-P2M-F1 until the fix was lifted in the
+		// composite (P2-M final @ 0de34bd72 inside 3c74fa393); the boundary must now document the
+		// lift and its basis so the combination cannot silently regress to an undocumented state.
 		assert.ok(
-			scenario.boundaries.some((boundary) => boundary.includes("BLOCKED-BY-P2M-F1")),
-			`${id} must keep the P2-M review-1 F1 block on the reference+refine combination`,
+			scenario.boundaries.some((boundary) => boundary.includes("P2-M F1 was lifted")),
+			`${id} must document the P2-M F1 lift basis for the reference+refine combination`,
 		);
 	}
 	const ax10 = scenarioById("AX10");

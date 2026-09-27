@@ -59,7 +59,7 @@ export function fixturePresence(rootUrl = new URL("../..", import.meta.url)) {
 const COMPOSITE_PROBES = {
 	"P2-A/P2-B": ["src/live/model-service.ts", "src/live/health-service.ts", "src/live/stream-bridge.ts"],
 	"P2-S": ["src/live/skill-services.ts", "src/live/skill-validation.ts"],
-	"P2-G": ["src/live/goal-command.ts", "src/live/goal-recovery.ts"],
+	"P2-G": ["src/live/goal-command.ts", "src/live/goal-planner.ts"],
 	"P2-W": ["scripts/worker-service.mjs"],
 	"P2-D": ["src/live/storage-service.ts"],
 	"P3-I": ["src/live/runtime-configuration.ts", "src/live/auxiliary-models.ts"],
@@ -106,7 +106,7 @@ export const AX_SCENARIOS = [
 			"no project-adoption fact is published before goal-contract acceptance",
 			"repeated settle of the same completion request does not count twice",
 		],
-		boundaries: ["adoption-fact publication is memory-tiered; the reference+refine cross-check is BLOCKED-BY-P2M-F1"],
+		boundaries: ["adoption-fact publication is memory-tiered; the reference+refine combination is exercised directly since P2-M F1 was lifted (P2-M final @ 0de34bd72 in composite 3c74fa393)"],
 	},
 	{
 		id: "AX3",
@@ -189,7 +189,7 @@ export const AX_SCENARIOS = [
 		],
 		boundaries: [
 			"requires a real PostgreSQL 17 container (docker + PI861_PG17_TESTS=1); no container = explicit block, never skip-to-pass",
-			"any step combining persistent controlled references WITH refinement is BLOCKED-BY-P2M-F1 (P2-M review-1 F1) until the fix is re-verified",
+			"reference+refine combination is exercised directly since P2-M F1 was lifted (projection-proof layout, P2-M final @ 0de34bd72 in composite 3c74fa393); failure here re-blocks it",
 		],
 	},
 	{
@@ -207,8 +207,8 @@ export const AX_SCENARIOS = [
 		],
 		boundaries: [
 			"requires a real PostgreSQL 17 container (docker + PI861_PG17_TESTS=1)",
-			"P1-Q provides no DB-level fault proxy; connection loss is injected by stopping/restarting the fixture container or by the storage service's own failure hooks - recorded in evidence",
-			"reference+refine combined steps are BLOCKED-BY-P2M-F1",
+			"P1-Q provides no DB-level fault proxy; connection loss is injected by stopping/restarting the fixture container (docker stop/start by container name) - recorded in evidence",
+			"reference+refine combination exercised directly since P2-M F1 was lifted (composite 3c74fa393)",
 		],
 	},
 	{
@@ -254,7 +254,7 @@ export const AX_SCENARIOS = [
 		],
 		boundaries: [
 			"requires docker + PI861_PG17_TESTS=1 and a real Pi CLI via PI861_TEST_PI_CLI",
-			"reference+refine combination inside the loop is BLOCKED-BY-P2M-F1 until re-verified",
+			"reference+refine combination exercised directly since P2-M F1 was lifted (composite 3c74fa393)",
 			"same-machine multi-process is labeled same-machine; never reported as cross-host",
 		],
 	},
