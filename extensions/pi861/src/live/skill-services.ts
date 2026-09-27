@@ -21,8 +21,7 @@ export function auxiliaryGrouping(
 	invocations: AuxiliaryModelInvocations,
 	context: AuxiliaryCallContext,
 ): NonNullable<SkillRepositoryOptions["classify"]> {
-	return (input, signal) =>
-		invocations.groupSkill(context, input.source, input.groups, signal, input.installed);
+	return (input, signal) => invocations.groupSkill(context, input.source, input.groups, signal, input.installed);
 }
 
 /**

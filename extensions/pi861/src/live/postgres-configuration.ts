@@ -88,12 +88,11 @@ export function postgresPoolOptions(
 		connectionTimeoutMillis,
 		idleTimeoutMillis,
 		statement_timeout,
-		ssl:
-			config.allowLocalPlaintext
-				? false
-				: {
-						rejectUnauthorized: true,
-						...(config.caFile ? { ca: readFileSync(config.caFile, "utf8") } : {}),
-					},
+		ssl: config.allowLocalPlaintext
+			? false
+			: {
+					rejectUnauthorized: true,
+					...(config.caFile ? { ca: readFileSync(config.caFile, "utf8") } : {}),
+				},
 	};
 }

@@ -68,7 +68,9 @@ const TEST_SUMMARY_KEYS = ["tests", "pass", "fail", "cancelled", "skipped", "tod
  */
 export function parseTestCounts(output: string): TestCounts | null {
 	const values = new Map<string, number>();
-	for (const match of output.matchAll(/^[ \t]*(?:#|ℹ)[ \t]*(tests|pass|fail|cancelled|skipped|todo)[ \t]+(\d+)[ \t]*$/gm))
+	for (const match of output.matchAll(
+		/^[ \t]*(?:#|ℹ)[ \t]*(tests|pass|fail|cancelled|skipped|todo)[ \t]+(\d+)[ \t]*$/gm,
+	))
 		values.set(match[1] ?? "", Number(match[2] ?? "0"));
 	if (TEST_SUMMARY_KEYS.some((key) => !values.has(key))) return null;
 	const counts = {
@@ -158,7 +160,9 @@ export function parseAcceptanceConfig(input: unknown): AcceptanceConfig {
 				// Case-insensitive: environment-variable lookup on Windows ignores case, so a
 				// lowercase spelling would still reach the child as the real opt-in (review-1 D3r).
 				if (/^PI861_REAL_/i.test(key))
-					throw new Error("Real-service authorization variables cannot be passed through acceptance configuration");
+					throw new Error(
+						"Real-service authorization variables cannot be passed through acceptance configuration",
+					);
 				env[key] = value;
 			}
 		}
@@ -295,10 +299,22 @@ export interface WorkerPairValidation {
 export function validateWorkerPairEvidence(input: unknown): WorkerPairValidation {
 	const root = record(input);
 	if (!root || root.kind !== "pi-worker-pair" || !Array.isArray(root.workers))
-		return { valid: false, workers: 0, distinctPids: false, distinctWorkspaces: false, reason: "not worker pair evidence" };
+		return {
+			valid: false,
+			workers: 0,
+			distinctPids: false,
+			distinctWorkspaces: false,
+			reason: "not worker pair evidence",
+		};
 	const workers: unknown[] = root.workers;
 	if (workers.length < 2)
-		return { valid: false, workers: workers.length, distinctPids: false, distinctWorkspaces: false, reason: "fewer than two workers" };
+		return {
+			valid: false,
+			workers: workers.length,
+			distinctPids: false,
+			distinctWorkspaces: false,
+			reason: "fewer than two workers",
+		};
 	const parsed: WorkerPairWorkerEvidence[] = [];
 	for (const raw of workers) {
 		const item = record(raw);
@@ -311,7 +327,13 @@ export function validateWorkerPairEvidence(input: unknown): WorkerPairValidation
 			!isAbsolute(item.workspace) ||
 			typeof item.startedAt !== "string"
 		)
-			return { valid: false, workers: workers.length, distinctPids: false, distinctWorkspaces: false, reason: "invalid worker record" };
+			return {
+				valid: false,
+				workers: workers.length,
+				distinctPids: false,
+				distinctWorkspaces: false,
+				reason: "invalid worker record",
+			};
 		parsed.push({ pid: item.pid, workspace: item.workspace, startedAt: item.startedAt });
 	}
 	const pids = new Set(parsed.map((worker) => worker.pid)),

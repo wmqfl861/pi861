@@ -153,7 +153,7 @@ export class SkillRepository {
 	async install(
 		directory: string,
 		metadata: { id: string; revision: string; group?: string },
-		signal = new AbortController().signal,
+		signal: AbortSignal = new AbortController().signal,
 	): Promise<SkillSource> {
 		if (
 			![metadata.id, metadata.revision, ...(metadata.group === undefined ? [] : [metadata.group])].every(
@@ -485,8 +485,7 @@ export class SkillRepository {
 	): Promise<string> {
 		const serialized = JSON.stringify(value);
 		if (serialized === undefined) throw new Error("Tool result is not serializable");
-		if (owner.scope !== undefined && !isValidScope(owner.scope))
-			throw new Error("Invalid artifact scope");
+		if (owner.scope !== undefined && !isValidScope(owner.scope)) throw new Error("Invalid artifact scope");
 		if (owner.producedBy !== undefined) validateExecutionIdentity(owner.producedBy);
 		const bytes = Buffer.from(serialized),
 			limit = this.options.maxResultBytes ?? 4_194_304;

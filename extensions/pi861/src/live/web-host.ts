@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { PiHost } from "../../index.ts";
-import { ResultStore } from "../result-store.ts";
 import type { ResultMetadata, StoredResultPage, StoredResultReference } from "../result-store.ts";
+import { ResultStore } from "../result-store.ts";
 import { packSearchResult, SearchFailure, type SearchOptions, webSearch } from "../search.ts";
 import { abortable } from "../web-control.ts";
 import { defaultWebReadLimits, WebReadFailure, type WebReadOptions, webRead } from "../web-read.ts";
@@ -86,16 +86,15 @@ export function installWebTools(pi: PiHost, options: WebHostOptions): { close():
 			const request = { ...captured, kind, url };
 			await authorize(request, generation, signal);
 			signal.throwIfAborted();
-			if (options.reserveRequest)
-				await abortable(Promise.resolve(options.reserveRequest(request, signal)), signal);
+			if (options.reserveRequest) await abortable(Promise.resolve(options.reserveRequest(request, signal)), signal);
 			signal.throwIfAborted();
 			await authorize(request, generation, signal);
 			if (!enabled(kind)) throw new Error("Web capability disabled");
 		};
 	const operationTimeoutMs = (kind: "search" | "web-read"): number =>
 		kind === "search"
-			? options.search?.timeoutMs ?? 15_000
-			: options.webRead?.limits?.timeoutMs ?? defaultWebReadLimits.timeoutMs;
+			? (options.search?.timeoutMs ?? 15_000)
+			: (options.webRead?.limits?.timeoutMs ?? defaultWebReadLimits.timeoutMs);
 	const run = async (kind: "search" | "web-read", input: string, signal?: AbortSignal): Promise<unknown> => {
 		if (!enabled(kind)) throw new Error("Web capability disabled");
 		const captured = identity(),
@@ -232,7 +231,11 @@ export function installWebTools(pi: PiHost, options: WebHostOptions): { close():
 					resultTimeoutMs,
 				);
 				try {
-					const effective = AbortSignal.any([signal ?? new AbortController().signal, lifetime.signal, operation.signal]);
+					const effective = AbortSignal.any([
+						signal ?? new AbortController().signal,
+						lifetime.signal,
+						operation.signal,
+					]);
 					effective.throwIfAborted();
 					if (
 						typeof parameters.resultRef !== "string" ||

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { type MeteredKind, ProbeInFlight, type UsageMeasure } from "../contracts/budget.ts";
 import { digest } from "../memory.ts";
-import { type MeteredKind, type UsageMeasure, ProbeInFlight } from "../contracts/budget.ts";
 import {
 	type Attempt,
 	type ExecutionMode,
@@ -634,10 +634,7 @@ export class ModelRuntime<TContext, TResponse> {
 	): Promise<R> {
 		const intent = randomUUID();
 		if (this.hooks.requests)
-			return this.hooks.requests.attempt(
-				{ requestId: intent, purpose, target, signal, ...admission },
-				work,
-			);
+			return this.hooks.requests.attempt({ requestId: intent, purpose, target, signal, ...admission }, work);
 		let usage: UsageMeasurement | undefined;
 		await this.hooks.meter?.begin(intent, purpose);
 		let result: R;
@@ -724,9 +721,9 @@ export class ModelRuntime<TContext, TResponse> {
 					this.requests++;
 					this.persist();
 					try {
-					const result = await this.metered(target, "execution", requestSignal, (onUsage) =>
-						this.infer(target, context, requestSignal, onProgress, onUsage, attempt),
-					);
+						const result = await this.metered(target, "execution", requestSignal, (onUsage) =>
+							this.infer(target, context, requestSignal, onProgress, onUsage, attempt),
+						);
 						await this.hooks.health?.recordSuccess(faultDomainKey(target));
 						return result;
 					} catch (error) {

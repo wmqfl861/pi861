@@ -200,7 +200,8 @@ export async function runControlledExtraction(
 function childMain(): void {
 	process.on("message", (request: unknown) => {
 		const reply = (() => {
-			if (!isExtractionRequest(request)) return { ok: false, text: "", truncated: false, message: "invalid request" };
+			if (!isExtractionRequest(request))
+				return { ok: false, text: "", truncated: false, message: "invalid request" };
 			try {
 				const extracted = extractText(request.body, request.mime);
 				const truncated = extracted.length > request.maxOutputCharacters;
@@ -210,7 +211,12 @@ function childMain(): void {
 					truncated,
 				};
 			} catch (error) {
-				return { ok: false, text: "", truncated: false, message: error instanceof Error ? error.message : "failure" };
+				return {
+					ok: false,
+					text: "",
+					truncated: false,
+					message: error instanceof Error ? error.message : "failure",
+				};
 			}
 		})();
 		// The detached method would lose its receiver; bind it. Exit once the reply is flushed;

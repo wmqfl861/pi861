@@ -47,7 +47,15 @@ function skipRawText(lower: string, from: number, close: string, length: number)
 	while (at !== -1) {
 		const after = at + close.length;
 		const code = after < length ? lower.charCodeAt(after) : -1;
-		if (code === -1 || code === 0x3e /* > */ || code === 0x2f /* / */ || code === 0x20 || code === 0x09 || code === 0x0a || code === 0x0d) {
+		if (
+			code === -1 ||
+			code === 0x3e /* > */ ||
+			code === 0x2f /* / */ ||
+			code === 0x20 ||
+			code === 0x09 ||
+			code === 0x0a ||
+			code === 0x0d
+		) {
 			const end = lower.indexOf(">", after);
 			return end === -1 ? length : end + 1;
 		}

@@ -39,7 +39,12 @@ export interface RuntimeWebConfig {
 		maxResponseBytes?: number;
 		timeoutMs?: number;
 	};
-	read?: { enabled: boolean; allowedHosts: string[]; limits?: Partial<RuntimeWebReadLimits>; allowLoopbackHttp?: boolean };
+	read?: {
+		enabled: boolean;
+		allowedHosts: string[];
+		limits?: Partial<RuntimeWebReadLimits>;
+		allowLoopbackHttp?: boolean;
+	};
 	roleIds: string[];
 	maxRequests: number;
 	allowWorkerWeb?: boolean;

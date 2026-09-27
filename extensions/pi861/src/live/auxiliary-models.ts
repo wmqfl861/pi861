@@ -1,6 +1,6 @@
 import type { RuntimeSkill } from "../capabilities.ts";
-import { type MeteredKind, type TaskTreeBudget, type UsageMeasure } from "../contracts/budget.ts";
-import { type PrincipalCredential, IdentityAuthority, parseScope } from "../contracts/identity.ts";
+import type { MeteredKind, TaskTreeBudget, UsageMeasure } from "../contracts/budget.ts";
+import { type IdentityAuthority, type PrincipalCredential, parseScope } from "../contracts/identity.ts";
 import type { ModelTarget } from "../routing.ts";
 import type { TaskSpec } from "../scheduler.ts";
 import {
@@ -10,8 +10,8 @@ import {
 	projectPlan,
 	routeClassifier,
 	type SkillCompileInput,
-	skillCompiler,
 	type SkillGrouping,
+	skillCompiler,
 } from "./compilers.ts";
 import type { ExecutionSpec } from "./coordinator.ts";
 import type { MemoryExtractor } from "./layered-memory.ts";
@@ -29,10 +29,7 @@ import type { SkillSource } from "./skill-repository.ts";
  */
 
 /** C3 metered kinds S routes for the four auxiliary call families. */
-export type AuxiliaryMeteredKind = Extract<
-	MeteredKind,
-	"reception" | "skill-compile" | "distill" | "planning"
->;
+export type AuxiliaryMeteredKind = Extract<MeteredKind, "reception" | "skill-compile" | "distill" | "planning">;
 
 /** M1 UsagePurpose subset used by auxiliary invocations ("classify" for reception, "auxiliary" for the rest). */
 export type AuxiliaryModelPurpose = "classify" | "auxiliary";
@@ -102,13 +99,10 @@ export function auxiliaryPort(
 					signal: request.signal,
 				},
 				(report) =>
-					transport(
-						{ prompt: request.prompt, target: request.target, signal: request.signal },
-						(usage) => {
-							report(usage);
-							onUsage(usage);
-						},
-					),
+					transport({ prompt: request.prompt, target: request.target, signal: request.signal }, (usage) => {
+						report(usage);
+						onUsage(usage);
+					}),
 			),
 		newRequestId: () => newRequestId(),
 	};
@@ -225,7 +219,11 @@ export class AuxiliaryModelInvocations {
 	}
 
 	/** Skill compilation; approvedBindings is mandatory and every declared tool must be operator-approved (R4.6). */
-	async compileSkill(context: AuxiliaryCallContext, input: SkillCompileInput, signal: AbortSignal): Promise<RuntimeSkill> {
+	async compileSkill(
+		context: AuxiliaryCallContext,
+		input: SkillCompileInput,
+		signal: AbortSignal,
+	): Promise<RuntimeSkill> {
 		if (!Array.isArray(input?.approvedBindings))
 			throw new Error("Skill compilation requires operator-approved tool bindings");
 		return skillCompiler(this.sharedGenerate("skill-compile", "auxiliary", this.targets.compiler, context)).compile(
@@ -253,10 +251,10 @@ export class AuxiliaryModelInvocations {
 
 	/** Memory distillation of one untrusted historical record; the extractor validates the model output shape. */
 	async enrich(context: AuxiliaryCallContext, input: AuxiliaryRecordInput, signal: AbortSignal): Promise<unknown> {
-		return memoryExtractor(this.targets.enrich.id, this.sharedGenerate("distill", "auxiliary", this.targets.enrich, context)).extract(
-			input,
-			signal,
-		);
+		return memoryExtractor(
+			this.targets.enrich.id,
+			this.sharedGenerate("distill", "auxiliary", this.targets.enrich, context),
+		).extract(input, signal);
 	}
 
 	/** Bounded project planning against operator-supplied model/role/check vocabularies (R8.6). */
@@ -316,7 +314,10 @@ export class AuxiliaryModelInvocations {
 			}
 		};
 		try {
-			const text = await this.port.attempt({ requestId: this.port.newRequestId(), purpose, target, signal, prompt }, onUsage);
+			const text = await this.port.attempt(
+				{ requestId: this.port.newRequestId(), purpose, target, signal, prompt },
+				onUsage,
+			);
 			this.settleReservation(reservation.reservationId, measurement, estimate.unknown);
 			return text;
 		} catch (error) {

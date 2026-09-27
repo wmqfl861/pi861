@@ -389,9 +389,12 @@ export class McpClient {
 			}
 			// Spec places the cursor at result.nextCursor; some servers send result._meta.nextCursor.
 			const meta = record(result._meta);
-			const nextCursor = typeof result.nextCursor === "string" ? result.nextCursor
-				: typeof meta?.nextCursor === "string" ? meta.nextCursor
-				: undefined;
+			const nextCursor =
+				typeof result.nextCursor === "string"
+					? result.nextCursor
+					: typeof meta?.nextCursor === "string"
+						? meta.nextCursor
+						: undefined;
 			if (!nextCursor) {
 				this.cached = tools;
 				if (token === this.changeToken) this.dirty = false;

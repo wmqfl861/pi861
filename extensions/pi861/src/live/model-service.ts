@@ -1,12 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { digest } from "../memory.ts";
 import {
 	BudgetExhausted,
 	type BudgetLimits,
 	type MeteredKind,
-	type UsageMeasure,
 	TaskTreeBudget,
+	type UsageMeasure,
 } from "../contracts/budget.ts";
+import { digest } from "../memory.ts";
 import {
 	type Attempt,
 	inferWithRecovery,
@@ -448,8 +448,7 @@ export class ModelRequestService {
 			estimate: request.estimate,
 			probeKey: request.probeKey,
 		});
-		if (!admission.admitted)
-			throw new Error("Model request already admitted; reconcile its receipt before retrying");
+		if (!admission.admitted) throw new Error("Model request already admitted; reconcile its receipt before retrying");
 		return this.runSettled(
 			request.requestId,
 			request.purpose,

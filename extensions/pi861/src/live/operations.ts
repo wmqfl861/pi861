@@ -46,8 +46,7 @@ export class OperationJournal {
 		const admitted = await this.store.update((state) => {
 			const prior = state.receipts[key];
 			if (prior) {
-				if (!sameIntent(prior, intent))
-					throw new Error("Operation idempotency conflict");
+				if (!sameIntent(prior, intent)) throw new Error("Operation idempotency conflict");
 				if (prior.state === "committed") return { cached: true, result: prior.result };
 				throw new Error(
 					`Operation ${intent.requestId} has ${prior.state} outcome; reconcile or create a reviewed new intent`,
@@ -57,9 +56,7 @@ export class OperationJournal {
 				const related = Object.values(state.receipts).filter(
 					(receipt) => receipt.principal === intent.principal && receipt.operationId === intent.operationId,
 				);
-				if (
-					related.some((receipt) => !sameBusiness(receipt, intent))
-				)
+				if (related.some((receipt) => !sameBusiness(receipt, intent)))
 					throw new Error("Business operation idempotency conflict");
 				const committed = related.find((receipt) => receipt.state === "committed");
 				if (committed) return { cached: true, result: committed.result };
@@ -198,8 +195,7 @@ export function toBusinessOperation(receipts: OperationReceipt[]): BusinessOpera
 	if (!withId.length) return undefined;
 	const committed = withId.find((receipt) => receipt.state === "committed");
 	const decisive =
-		committed ??
-		withId.reduce((newest, receipt) => (receipt.updatedAt > newest.updatedAt ? receipt : newest));
+		committed ?? withId.reduce((newest, receipt) => (receipt.updatedAt > newest.updatedAt ? receipt : newest));
 	const status = toBusinessStatus(decisive.state, decisive.priorState);
 	return {
 		operationId: decisive.operationId ?? "",

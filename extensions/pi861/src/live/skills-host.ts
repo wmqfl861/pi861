@@ -1,7 +1,7 @@
 import type { PiContext, PiHost } from "../../index.ts";
 import { type Activation, authorizeInvocation, type Role, type ToolBinding } from "../capabilities.ts";
-import { type ExecutionIdentity, validateExecutionIdentity } from "../contracts/identity.ts";
 import type { FullToolIdentity } from "../contracts/capability.ts";
+import { type ExecutionIdentity, validateExecutionIdentity } from "../contracts/identity.ts";
 import { digest } from "../memory.ts";
 import { record } from "../search.ts";
 import { type McpClient, McpFailure, type McpTool } from "./mcp.ts";

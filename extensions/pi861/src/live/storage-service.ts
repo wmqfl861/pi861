@@ -1,6 +1,5 @@
 import { closeSync, fsyncSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
-import { IdempotencyConflict, type OutboxOutcome, VersionConflict } from "../contracts/storage.ts";
 import {
 	BudgetExhausted,
 	type BudgetLimits,
@@ -10,20 +9,21 @@ import {
 	type UsageMeasure,
 	type UsageReservation,
 } from "../contracts/budget.ts";
-import { type PersistentLease, issueLease, leaseValid } from "../contracts/lifecycle.ts";
 import { digest } from "../contracts/hash.ts";
 import { isValidScope } from "../contracts/identity.ts";
+import { issueLease, leaseValid, type PersistentLease } from "../contracts/lifecycle.ts";
+import { IdempotencyConflict, type OutboxOutcome, VersionConflict } from "../contracts/storage.ts";
 import {
+	checkPrincipal,
 	type MemoryInput,
 	type MemoryItem,
 	type MemoryPrincipal,
 	type MemoryReceipt,
 	type MemoryWrite,
-	checkPrincipal,
 } from "../memory.ts";
-import { type MemoryMigrationResult, type MemoryMigrationSource, migrateMemory } from "./memory-migration.ts";
-import { type EnrichmentJobView, type MemoryExtractor } from "./extraction.ts";
 import { PostgresMemory, type SqlConnection, type SqlPool } from "../postgres.ts";
+import type { EnrichmentJobView, MemoryExtractor } from "./extraction.ts";
+import { type MemoryMigrationResult, type MemoryMigrationSource, migrateMemory } from "./memory-migration.ts";
 
 /**
  * P2-D trusted storage service. Workers hold no database credentials: they present a
@@ -43,7 +43,8 @@ function scopeList(value: unknown, field: string): string[] {
 	if (!Array.isArray(value) || !value.length || !value.every((entry) => typeof entry === "string"))
 		throw new StorageSchemaError(`Service principal ${field} must be a non-empty scope list`);
 	const scopes = value as string[];
-	if (!scopes.every(isValidScope)) throw new StorageSchemaError(`Service principal ${field} contains an invalid scope`);
+	if (!scopes.every(isValidScope))
+		throw new StorageSchemaError(`Service principal ${field} contains an invalid scope`);
 	return scopes;
 }
 
@@ -266,7 +267,12 @@ export class StorageSession {
 		});
 	}
 
-	registerBudgetTask(budgetId: string, taskId: string, parentTaskId: string | null, subtreeLimits?: BudgetLimits): Promise<void> {
+	registerBudgetTask(
+		budgetId: string,
+		taskId: string,
+		parentTaskId: string | null,
+		subtreeLimits?: BudgetLimits,
+	): Promise<void> {
 		return this.budgetTransaction(budgetId, (budget) => budget.registerTask(taskId, parentTaskId, subtreeLimits));
 	}
 	reserveBudget(
@@ -276,9 +282,7 @@ export class StorageSession {
 		estimate: UsageMeasure,
 		options: { probeKey?: string } = {},
 	): Promise<UsageReservation> {
-		return this.budgetTransaction(budgetId, (budget) =>
-			budget.reserve(taskId, kind, estimate, Date.now(), options),
-		);
+		return this.budgetTransaction(budgetId, (budget) => budget.reserve(taskId, kind, estimate, Date.now(), options));
 	}
 	settleBudget(budgetId: string, reservationId: string, actual: UsageMeasure): Promise<void> {
 		return this.budgetTransaction(budgetId, (budget) => budget.settle(reservationId, actual));
@@ -290,9 +294,12 @@ export class StorageSession {
 	releaseBudget(budgetId: string, reservationId: string): Promise<void> {
 		return this.budgetTransaction(budgetId, (budget) => budget.release(reservationId));
 	}
-	async budgetUsage(
-		budgetId: string,
-	): Promise<{ attempts: number; usage: UsageMeasure; unknownSettlements: number; openReservations: UsageReservation[] }> {
+	async budgetUsage(budgetId: string): Promise<{
+		attempts: number;
+		usage: UsageMeasure;
+		unknownSettlements: number;
+		openReservations: UsageReservation[];
+	}> {
 		const budget = await this.loadBudget(budgetId);
 		return { ...budget.usage, openReservations: budget.openReservations() };
 	}
@@ -452,12 +459,15 @@ export class StorageSession {
 			const parameters: unknown[] = [this.identity.tenantId, sequence];
 			let sql: string;
 			if (outcome === "dispatched") {
-				sql = "UPDATE pi861_memory_events SET state='dispatched', attempts=attempts+1 WHERE tenant_id=$1 AND sequence=$2 AND state='pending' RETURNING sequence";
+				sql =
+					"UPDATE pi861_memory_events SET state='dispatched', attempts=attempts+1 WHERE tenant_id=$1 AND sequence=$2 AND state='pending' RETURNING sequence";
 			} else if (outcome === "failed-terminal") {
-				sql = "UPDATE pi861_memory_events SET state='failed', attempts=attempts+1 WHERE tenant_id=$1 AND sequence=$2 AND state='pending' RETURNING sequence";
+				sql =
+					"UPDATE pi861_memory_events SET state='failed', attempts=attempts+1 WHERE tenant_id=$1 AND sequence=$2 AND state='pending' RETURNING sequence";
 			} else {
 				parameters.push(Math.max(1, Math.floor(outcome.retryAfterMs)), outcome.error.slice(0, 500));
-				sql = "UPDATE pi861_memory_events SET attempts=attempts+1, next_attempt_at=clock_timestamp()+($3::bigint * interval '1 millisecond'), last_error=$4 " +
+				sql =
+					"UPDATE pi861_memory_events SET attempts=attempts+1, next_attempt_at=clock_timestamp()+($3::bigint * interval '1 millisecond'), last_error=$4 " +
 					"WHERE tenant_id=$1 AND sequence=$2 AND state='pending' RETURNING sequence";
 			}
 			const updated = await connection.query(sql, parameters);
@@ -490,7 +500,9 @@ export class StorageService {
 			);
 			const versions = new Set(schema.rows.map((row) => String(row.version)));
 			if (!versions.has("memory-v3") || !versions.has("storage-v4"))
-				throw new StorageSchemaError("Run the explicit memory-v3 and storage-v4 migrations before starting the service");
+				throw new StorageSchemaError(
+					"Run the explicit memory-v3 and storage-v4 migrations before starting the service",
+				);
 			const directory = await connection.query("SELECT to_regclass('pi861_service_principals') AS present");
 			if (!directory.rows[0]?.present)
 				throw new StorageSchemaError("Service identity directory is missing; run the storage-v4 migration");
@@ -559,7 +571,8 @@ function operationOptionalString(value: unknown, field: string): string | undefi
 const METERED_KINDS = ["execution", "reception", "planning", "skill-compile", "distill", "probe", "auxiliary"] as const;
 function operationKind(value: unknown): MeteredKind {
 	const name = operationString(value, "kind");
-	if (!METERED_KINDS.includes(name as (typeof METERED_KINDS)[number])) throw new Error(`Field kind is not a metered kind: ${name}`);
+	if (!METERED_KINDS.includes(name as (typeof METERED_KINDS)[number]))
+		throw new Error(`Field kind is not a metered kind: ${name}`);
 	return name as MeteredKind;
 }
 function operationOutcome(value: unknown): OutboxOutcome {
@@ -594,7 +607,10 @@ const STORAGE_OPERATIONS: Record<StorageOperationName, OperationHandler> = {
 		),
 	get: (session, args) => session.get(operationString(args.scope, "scope"), operationString(args.id, "id")),
 	search: (session, args) =>
-		session.search(operationString(args.query, "query"), args.limit === undefined ? undefined : operationNumber(args.limit, "limit")),
+		session.search(
+			operationString(args.query, "query"),
+			args.limit === undefined ? undefined : operationNumber(args.limit, "limit"),
+		),
 	list: (session, args) =>
 		session.list(
 			operationString(args.scope, "scope"),
@@ -607,7 +623,10 @@ const STORAGE_OPERATIONS: Record<StorageOperationName, OperationHandler> = {
 			args.limit === undefined ? undefined : operationNumber(args.limit, "limit"),
 		),
 	reconcile: (session, args) =>
-		session.reconcile(operationString(args.requestId, "requestId"), operationOptionalString(args.expectedDigest, "expectedDigest")),
+		session.reconcile(
+			operationString(args.requestId, "requestId"),
+			operationOptionalString(args.expectedDigest, "expectedDigest"),
+		),
 	listJobs: (session) => session.listJobs(),
 	requeueJob: (session, args) => session.requeueJob(operationString(args.jobId, "jobId")),
 	createBudget: (session, args) =>
@@ -619,7 +638,9 @@ const STORAGE_OPERATIONS: Record<StorageOperationName, OperationHandler> = {
 		session.registerBudgetTask(
 			operationString(args.budgetId, "budgetId"),
 			operationString(args.taskId, "taskId"),
-			args.parentTaskId === null || args.parentTaskId === undefined ? null : operationString(args.parentTaskId, "parentTaskId"),
+			args.parentTaskId === null || args.parentTaskId === undefined
+				? null
+				: operationString(args.parentTaskId, "parentTaskId"),
 			args.subtreeLimits as BudgetLimits | undefined,
 		),
 	reserveBudget: (session, args) =>
@@ -643,17 +664,30 @@ const STORAGE_OPERATIONS: Record<StorageOperationName, OperationHandler> = {
 			args.conservativeEstimate as UsageMeasure,
 		),
 	releaseBudget: (session, args) =>
-		session.releaseBudget(operationString(args.budgetId, "budgetId"), operationString(args.reservationId, "reservationId")),
+		session.releaseBudget(
+			operationString(args.budgetId, "budgetId"),
+			operationString(args.reservationId, "reservationId"),
+		),
 	budgetUsage: (session, args) => session.budgetUsage(operationString(args.budgetId, "budgetId")),
 	acquireLease: (session, args) =>
-		session.acquireLease(operationString(args.purpose, "purpose"), operationString(args.owner, "owner"), operationNumber(args.leaseMs, "leaseMs")),
+		session.acquireLease(
+			operationString(args.purpose, "purpose"),
+			operationString(args.owner, "owner"),
+			operationNumber(args.leaseMs, "leaseMs"),
+		),
 	renewLease: (session, args) =>
-		session.renewLease(operationString(args.purpose, "purpose"), operationString(args.token, "token"), operationNumber(args.leaseMs, "leaseMs")),
+		session.renewLease(
+			operationString(args.purpose, "purpose"),
+			operationString(args.token, "token"),
+			operationNumber(args.leaseMs, "leaseMs"),
+		),
 	releaseLease: (session, args) =>
 		session.releaseLease(operationString(args.purpose, "purpose"), operationString(args.token, "token")),
 	leaseSnapshot: (session, args) => session.leaseSnapshot(operationString(args.purpose, "purpose")),
-	claimEvents: (session, args) => session.claimEvents(args.limit === undefined ? undefined : operationNumber(args.limit, "limit")),
-	completeEvent: (session, args) => session.completeEvent(operationNumber(args.sequence, "sequence"), operationOutcome(args.outcome)),
+	claimEvents: (session, args) =>
+		session.claimEvents(args.limit === undefined ? undefined : operationNumber(args.limit, "limit")),
+	completeEvent: (session, args) =>
+		session.completeEvent(operationNumber(args.sequence, "sequence"), operationOutcome(args.outcome)),
 };
 
 function storageErrorStatus(error: unknown): number {
@@ -691,11 +725,13 @@ export class StorageOperationDispatcher {
 		let name: string;
 		let args: Record<string, unknown>;
 		try {
-			if (body === null || typeof body !== "object" || Array.isArray(body)) throw new Error("Request body must be an object");
+			if (body === null || typeof body !== "object" || Array.isArray(body))
+				throw new Error("Request body must be an object");
 			const record = body as Record<string, unknown>;
 			name = operationString(record.op, "op");
 			if (record.args !== undefined && record.args !== null) {
-				if (typeof record.args !== "object" || Array.isArray(record.args)) throw new Error("Field args must be an object");
+				if (typeof record.args !== "object" || Array.isArray(record.args))
+					throw new Error("Field args must be an object");
 				args = record.args as Record<string, unknown>;
 			} else {
 				args = {};
@@ -819,11 +855,17 @@ export async function migrateStorage(pool: SqlPool, options: StorageMigrationOpt
 			const reason = error instanceof Error ? error.message : "memory migration failed";
 			writeFileSynced(
 				options.conflictReportPath,
-				JSON.stringify(
-					{ format: 1, generatedAt: Date.now(), applied, skipped, conflicts: [`memory migration failed: ${reason}`] },
+				`${JSON.stringify(
+					{
+						format: 1,
+						generatedAt: Date.now(),
+						applied,
+						skipped,
+						conflicts: [`memory migration failed: ${reason}`],
+					},
 					null,
 					"\t",
-				) + "\n",
+				)}\n`,
 			);
 			throw error;
 		}
@@ -848,7 +890,9 @@ export async function migrateStorage(pool: SqlPool, options: StorageMigrationOpt
 				"SELECT to_regclass('pi861_service_principals') AS principals, to_regclass('pi861_budgets') AS budgets, to_regclass('pi861_leases') AS leases",
 			);
 			if (Object.values(present.rows[0] ?? {}).some((table) => !table)) {
-				conflicts.push("storage-v4 ledger entry exists without its tables; complete or undo the partial schema first");
+				conflicts.push(
+					"storage-v4 ledger entry exists without its tables; complete or undo the partial schema first",
+				);
 				await writeReport();
 				throw new Error("Storage ledger does not match the schema");
 			}
@@ -857,9 +901,12 @@ export async function migrateStorage(pool: SqlPool, options: StorageMigrationOpt
 		} else {
 			// The identity directory lives in the tenant schema without RLS; tenant
 			// tables without a ledger entry are conflicts.
-			const orphan = (await connection.query(
-				"SELECT to_regclass('pi861_budgets') AS budgets, to_regclass('pi861_leases') AS leases",
-			)).rows[0] ?? {};
+			const orphan =
+				(
+					await connection.query(
+						"SELECT to_regclass('pi861_budgets') AS budgets, to_regclass('pi861_leases') AS leases",
+					)
+				).rows[0] ?? {};
 			if (orphan.budgets || orphan.leases) {
 				conflicts.push("storage-v4 tenant tables already exist without a ledger entry; refusing to overwrite");
 				await writeReport();
@@ -894,11 +941,7 @@ export async function migrateStorage(pool: SqlPool, options: StorageMigrationOpt
 		async function writeReport(): Promise<void> {
 			writeFileSynced(
 				options.conflictReportPath,
-				JSON.stringify(
-					{ format: 1, generatedAt: Date.now(), applied, skipped, conflicts },
-					null,
-					"\t",
-				) + "\n",
+				`${JSON.stringify({ format: 1, generatedAt: Date.now(), applied, skipped, conflicts }, null, "\t")}\n`,
 			);
 		}
 	} catch (error) {

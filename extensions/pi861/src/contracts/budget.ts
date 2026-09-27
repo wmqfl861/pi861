@@ -502,8 +502,7 @@ export class TaskTreeCapacity {
 		const maxProjectTasks = options.maxProjectTasks ?? DEFAULT_SCHEDULING.maxProjectTasks;
 		if (!Number.isSafeInteger(maxConcurrentTasks) || maxConcurrentTasks < 1)
 			throw new Error("Invalid concurrency limit");
-		if (!Number.isSafeInteger(maxProjectTasks) || maxProjectTasks < 1)
-			throw new Error("Invalid project task limit");
+		if (!Number.isSafeInteger(maxProjectTasks) || maxProjectTasks < 1) throw new Error("Invalid project task limit");
 		this.maxConcurrentTasksValue = maxConcurrentTasks;
 		this.maxProjectTasksValue = maxProjectTasks;
 	}

@@ -19,10 +19,13 @@ import {
 
 const arguments_ = process.argv.slice(2);
 
+/** @param {string} text */
 function fenced(text) {
-	return "````text\n" + (text ? `${text.replace(/\n$/, "")}\n\n` : "\n") + "````";
+	return "````text\n".concat(text ? `${text.replace(/\n$/, "")}\n\n` : "\n", "````");
 }
 
+/** @param {import("../src/live/acceptance.ts").AcceptanceReport} report
+ *  @param {{ suite?: string; requiredChecks?: { id: string; status: string; outcome: string }[]; workerPair?: import("../src/live/acceptance.ts").WorkerPairValidation }} [header] */
 function renderMarkdown(report, header) {
 	const lines = [
 		"# pi861 acceptance report",
@@ -89,21 +92,34 @@ function renderMarkdown(report, header) {
 	return `${lines.join("\n")}\n`;
 }
 
+/**
+ * @param {string[]} paths
+ */
 function distinctPaths(paths) {
 	return new Set(paths).size === paths.length;
 }
 
+/**
+ * @param {{ id: string; command: string; args: string[] }[]} checks
+ * @param {string} mode
+ */
 function refuseRealServiceScripts(checks, mode) {
 	for (const check of checks)
-		if (check.command.includes("real-acceptance") || check.args.some((argument) => argument.includes("real-acceptance")))
-			throw new Error(`Check ${check.id} routes to the default-closed real-service scripts; ${mode} cannot invoke them`);
+		if (
+			check.command.includes("real-acceptance") ||
+			check.args.some((argument) => argument.includes("real-acceptance"))
+		)
+			throw new Error(
+				`Check ${check.id} routes to the default-closed real-service scripts; ${mode} cannot invoke them`,
+			);
 }
 
 async function runSuiteMode() {
 	const flags = new Map();
 	for (let index = 0; index < arguments_.length; index += 2) {
 		const name = arguments_[index];
-		if (!name?.startsWith("--") || !arguments_[index + 1]) throw new Error(`Malformed runner flags near ${name ?? "end"}`);
+		if (!name?.startsWith("--") || !arguments_[index + 1])
+			throw new Error(`Malformed runner flags near ${name ?? "end"}`);
 		flags.set(name, arguments_[index + 1]);
 	}
 	const suite = flags.get("--suite"),
@@ -118,24 +134,38 @@ async function runSuiteMode() {
 	if (!distinctPaths([manifestPath, evidencePath])) throw new Error("Manifest and evidence paths must be distinct");
 
 	const manifest = parseAcceptanceManifest(JSON.parse(readFileSync(manifestPath, "utf8")));
-	if (manifest.suite !== suite) throw new Error(`Manifest suite ${manifest.suite} does not match requested suite ${suite}`);
+	if (manifest.suite !== suite)
+		throw new Error(`Manifest suite ${manifest.suite} does not match requested suite ${suite}`);
 	refuseRealServiceScripts(manifest.checks, "suites");
 
+	/** @type {Record<string, string>} */
 	const passthrough = {};
 	for (const name of manifest.environmentNames)
 		if (process.env[name] !== undefined) passthrough[name] = process.env[name];
 	const checks = manifest.checks.map((check) => ({ ...check, env: { ...passthrough, ...check.env } }));
 
+	/** @type {import("../src/live/acceptance.ts").WorkerPairValidation | undefined} */
 	let workerPair;
 	if (manifest.suite === "workers") {
 		try {
+			if (!manifest.workerPairEvidence) throw new Error("worker pair evidence path missing");
 			workerPair = validateWorkerPairEvidence(JSON.parse(readFileSync(manifest.workerPairEvidence, "utf8")));
 		} catch {
-			workerPair = { valid: false, workers: 0, distinctPids: false, distinctWorkspaces: false, reason: "unreadable worker pair evidence" };
+			workerPair = {
+				valid: false,
+				workers: 0,
+				distinctPids: false,
+				distinctWorkspaces: false,
+				reason: "unreadable worker pair evidence",
+			};
 		}
 	}
 
-	const acceptance = await runAcceptance({ workspace: manifest.workspace, checks, expectedCommit: manifest.expectedCommit });
+	const acceptance = await runAcceptance({
+		workspace: manifest.workspace,
+		checks,
+		expectedCommit: manifest.expectedCommit,
+	});
 	const byId = new Map(acceptance.checks.map((check) => [check.id, check]));
 	const requiredChecks = manifest.requiredChecks.map((id) => ({
 		id,
@@ -162,7 +192,9 @@ async function runSuiteMode() {
 		acceptance,
 	};
 	writeFileSync(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o600 });
-	writeFileSync(`${evidencePath}.md`, renderMarkdown(acceptance, { suite, requiredChecks, workerPair }), { mode: 0o600 });
+	writeFileSync(`${evidencePath}.md`, renderMarkdown(acceptance, { suite, requiredChecks, workerPair }), {
+		mode: 0o600,
+	});
 	process.stdout.write(`${JSON.stringify(evidence, null, 2)}\n`);
 	process.exitCode = status === "passed" ? 0 : 1;
 }
@@ -172,9 +204,10 @@ async function runPositionalMode() {
 	if (!configPath || !isAbsolute(configPath)) throw new Error("Absolute config path required");
 	if (!reportPath || !isAbsolute(reportPath)) throw new Error("Absolute report path required");
 	if (markdownPath && !isAbsolute(markdownPath)) throw new Error("Absolute markdown path required");
-	const markdown = markdownPath ?? (reportPath.endsWith(".json") ? `${reportPath.slice(0, -".json".length)}.md` : `${reportPath}.md`);
-	if (!distinctPaths([configPath, reportPath, markdown]))
-		throw new Error("Config and report paths must be distinct");
+	const markdown =
+		markdownPath ??
+		(reportPath.endsWith(".json") ? `${reportPath.slice(0, -".json".length)}.md` : `${reportPath}.md`);
+	if (!distinctPaths([configPath, reportPath, markdown])) throw new Error("Config and report paths must be distinct");
 	const config = parseAcceptanceConfig(JSON.parse(readFileSync(configPath, "utf8")));
 	refuseRealServiceScripts(config.checks, "positional configs");
 	const report = await runAcceptance(config);

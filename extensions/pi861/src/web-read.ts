@@ -267,7 +267,13 @@ async function resolveAddresses(hostname: string, lookup: AddressLookup): Promis
 		throw new WebReadFailure("Web read DNS resolution returned invalid addresses", "network_error");
 	return addresses;
 }
-function finishShape(url: URL, hostname: string, port: number, explicitPort: boolean, approvedPurpose?: string): WebTargetShape {
+function finishShape(
+	url: URL,
+	hostname: string,
+	port: number,
+	explicitPort: boolean,
+	approvedPurpose?: string,
+): WebTargetShape {
 	return {
 		protocol: url.protocol === "https:" ? "https:" : "http:",
 		hostname,
@@ -358,7 +364,11 @@ function finishTarget(shape: WebTargetShape, address: string, policy: string): W
  */
 export async function resolveWebTarget(shape: WebTargetShape, lookup: AddressLookup): Promise<WebTarget> {
 	if (shape.approvedPurpose !== undefined)
-		return finishTarget(shape, (await resolveAddresses(shape.hostname, lookup))[0] ?? "", `approved-endpoint:${shape.approvedPurpose}`);
+		return finishTarget(
+			shape,
+			(await resolveAddresses(shape.hostname, lookup))[0] ?? "",
+			`approved-endpoint:${shape.approvedPurpose}`,
+		);
 	const addresses = await resolveAddresses(shape.hostname, lookup);
 	// The loopback carve-out is decided on resolved addresses and applies to the whole answer set;
 	// like mcp.ts it is the single gate for local plaintext endpoints (including local high ports).
@@ -723,8 +733,7 @@ export async function webRead(
 				if (error instanceof WebReadFailure) throw error;
 				throw new WebReadFailure("Web read text extraction failed", "extraction_failed");
 			}
-			if (extraction.status === "timeout")
-				throw new WebReadFailure("Web read text extraction timed out", "timeout");
+			if (extraction.status === "timeout") throw new WebReadFailure("Web read text extraction timed out", "timeout");
 			const extracted = extraction.text;
 			const truncated = outcome.truncated || extraction.truncated;
 			let body: WebReadBody;

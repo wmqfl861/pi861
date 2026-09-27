@@ -1,4 +1,7 @@
-import { type AdoptionEvent, applyAdoption, type AssemblyMode } from "../contracts/memory.ts";
+import { type AdoptionEvent, type AssemblyMode, applyAdoption } from "../contracts/memory.ts";
+import { digest, type MemoryItem, type MemoryReceipt, type MemoryWrite } from "../memory.ts";
+import { type KernelAssemblyResult, toRecord } from "../memory-records.ts";
+import { PersistentResultStore, type ResultDescriptor } from "../result-store.ts";
 import {
 	CAPTURE_DIRECT_MAX_BYTES,
 	type CaptureOutcome,
@@ -6,16 +9,9 @@ import {
 	planToolCapture,
 	type ToolObservation,
 } from "./capture.ts";
-import {
-	type EnrichmentJobView,
-	type ExtractionFailureClass,
-	type MemoryExtractor,
-} from "./extraction.ts";
+import type { EnrichmentJobView, ExtractionFailureClass, MemoryExtractor } from "./extraction.ts";
 import { MemoryCommitPending, type PendingMemoryState, PendingMemoryWrites } from "./memory-pending.ts";
 import type { StateStore } from "./store.ts";
-import { type KernelAssemblyResult, toRecord } from "../memory-records.ts";
-import { digest, type MemoryInput, type MemoryItem, type MemoryReceipt, type MemoryWrite } from "../memory.ts";
-import { PersistentResultStore, type ResultDescriptor } from "../result-store.ts";
 
 /**
  * P2-M automatic memory governance. One service owns the whole automatic memory
@@ -59,7 +55,10 @@ export interface MemoryAuthoritySurface {
 	): Promise<{ changes: MemoryChangeView[]; cursor: number; hasMore: boolean }>;
 	listJobs(): Promise<EnrichmentJobView[]>;
 	requeueJob(jobId: string): Promise<EnrichmentJobView>;
-	enrich(extractor: MemoryExtractor, options: DistillOptions): Promise<{ completed: number; failed: number; obsolete: number }>;
+	enrich(
+		extractor: MemoryExtractor,
+		options: DistillOptions,
+	): Promise<{ completed: number; failed: number; obsolete: number }>;
 	reconcile?(
 		requestId: string,
 		expectedDigest?: string,
@@ -124,9 +123,7 @@ export interface UserStatementInput {
 	kind: "constraint" | "working" | "project";
 }
 
-export type MemoryRecoveryOutcome =
-	| { state: "committed"; receipt: MemoryReceipt }
-	| { state: "notCommitted" };
+export type MemoryRecoveryOutcome = { state: "committed"; receipt: MemoryReceipt } | { state: "notCommitted" };
 
 export class MemoryGovernanceAlreadyInstalled extends Error {
 	constructor() {
@@ -237,7 +234,11 @@ export class MemoryGovernance {
 			};
 		} catch (error) {
 			if (error instanceof MemoryCommitPending)
-				return { status: "failed", id: digest([observation.sessionId, observation.toolCallId]), error: `memory checkpoint uncommitted: ${error.requestId}` };
+				return {
+					status: "failed",
+					id: digest([observation.sessionId, observation.toolCallId]),
+					error: `memory checkpoint uncommitted: ${error.requestId}`,
+				};
 			const message = error instanceof Error ? error.message : "memory capture failed";
 			return {
 				status: "failed",
@@ -350,7 +351,12 @@ export class MemoryGovernance {
 	 * jobs and index events are invalidated in the same commit, and tombstones
 	 * block the same source from re-entering.
 	 */
-	async withdrawSource(requestId: string, scope: string, id: string, expectedRevision: number): Promise<MemoryReceipt> {
+	async withdrawSource(
+		requestId: string,
+		scope: string,
+		id: string,
+		expectedRevision: number,
+	): Promise<MemoryReceipt> {
 		return this.authority.withdraw(requestId, scope, id, expectedRevision);
 	}
 
@@ -411,7 +417,8 @@ export class MemoryGovernance {
 	 * must flush pending writes (same requestId, immutable payload).
 	 */
 	async reconcile(requestId: string, expectedDigest?: string): Promise<MemoryRecoveryOutcome> {
-		if (!this.authority.reconcile) throw new Error("Authority cannot reconcile receipts; flush pending writes instead");
+		if (!this.authority.reconcile)
+			throw new Error("Authority cannot reconcile receipts; flush pending writes instead");
 		return this.authority.reconcile(requestId, expectedDigest);
 	}
 
@@ -436,10 +443,7 @@ export interface GovernedMemoryHost {
  * the negative keeps a duplicated facade from installing a second capture
  * pipeline over the same authority.
  */
-export function attachMemoryGovernance(
-	host: GovernedMemoryHost,
-	options: MemoryGovernanceOptions,
-): MemoryGovernance {
+export function attachMemoryGovernance(host: GovernedMemoryHost, options: MemoryGovernanceOptions): MemoryGovernance {
 	if (host.memoryGovernance) throw new MemoryGovernanceAlreadyInstalled();
 	const governance = new MemoryGovernance(options);
 	host.memoryGovernance = governance;

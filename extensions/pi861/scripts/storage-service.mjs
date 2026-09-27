@@ -25,15 +25,14 @@ import { createServer } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
 import { isAbsolute } from "node:path";
 import { createPostgresPool } from "../src/live/postgres-configuration.ts";
-import {
-	ServicePrincipalDirectory,
-	StorageOperationDispatcher,
-	StorageService,
-} from "../src/live/storage-service.ts";
+import { ServicePrincipalDirectory, StorageOperationDispatcher, StorageService } from "../src/live/storage-service.ts";
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
 const MAX_BODY_BYTES = 1_048_576;
 
+/**
+ * @param {string} name
+ */
 function requiredEnv(name) {
 	const value = process.env[name];
 	if (!value) throw new Error(`Missing required environment variable: ${name}`);
@@ -57,6 +56,9 @@ const identityPool = createPostgresPool({ urlEnv: "PI861_STORAGE_IDENTITY_URL", 
 const service = new StorageService(dataPool, new ServicePrincipalDirectory(identityPool));
 const dispatcher = new StorageOperationDispatcher(service);
 
+/**
+ * @param {import("node:http").IncomingMessage} request
+ */
 async function readBody(request) {
 	const chunks = [];
 	let size = 0;
@@ -72,11 +74,17 @@ function useTls() {
 	if (LOOPBACK_HOSTS.has(host)) return undefined;
 	const cert = process.env.PI861_STORAGE_TLS_CERT;
 	const key = process.env.PI861_STORAGE_TLS_KEY;
-	if (!cert || !key) throw new Error("Non-loopback storage service binds require PI861_STORAGE_TLS_CERT and PI861_STORAGE_TLS_KEY");
+	if (!cert || !key)
+		throw new Error("Non-loopback storage service binds require PI861_STORAGE_TLS_CERT and PI861_STORAGE_TLS_KEY");
 	return { cert: readFileSync(cert, "utf8"), key: readFileSync(key, "utf8") };
 }
 
-/** One status line per response, written only after the payload exists. */
+/**
+ * One status line per response, written only after the payload exists.
+ * @param {import("node:http").ServerResponse} response
+ * @param {number} status
+ * @param {string} body
+ */
 function respond(response, status, body) {
 	if (response.headersSent) {
 		response.end();
@@ -86,14 +94,23 @@ function respond(response, status, body) {
 	response.end(body);
 }
 
+/**
+ * @param {import("node:http").IncomingMessage} request
+ * @param {import("node:http").ServerResponse} response
+ */
 function handle(request, response) {
 	void (async () => {
 		if (request.method !== "POST" || request.url !== "/") {
-			respond(response, 404, JSON.stringify({ ok: false, error: { code: "not-found", message: "POST / is the only endpoint" } }));
+			respond(
+				response,
+				404,
+				JSON.stringify({ ok: false, error: { code: "not-found", message: "POST / is the only endpoint" } }),
+			);
 			return;
 		}
 		const authorization = request.headers.authorization;
-		const token = typeof authorization === "string" && authorization.startsWith("Bearer ") ? authorization.slice(7) : "";
+		const token =
+			typeof authorization === "string" && authorization.startsWith("Bearer ") ? authorization.slice(7) : "";
 		try {
 			const body = await readBody(request);
 			const outcome = await dispatcher.handle(token, body);
