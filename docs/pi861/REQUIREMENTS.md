@@ -1,7 +1,7 @@
 # Pi861 需求台账（REQUIREMENTS）
 
 - 首版日期：2026-09-22（P1 阶段，DEVELOPMENT_PLAN.md 第三节第 1 条交付）。
-- 状态绑定代码版本：`e3f07a789b7648f26ec72ce65fa5856046dbd6d3`（分支 `feat/pi861-runtime-v1`）。后续阶段随开发更新本文件与 [ACCEPTANCE_MATRIX.md](ACCEPTANCE_MATRIX.md)。
+- 状态绑定代码版本（首版）：`e3f07a789b7648f26ec72ce65fa5856046dbd6d3`（分支 `feat/pi861-runtime-v1`）。**当前终态绑定（2026-09-27 P4-D）**：SnapshotID-3 = 基线 `d28044896` + HEAD `5cacec62e` + 143 文件清单 digest `88b5c12c…fbfb7f`，逐条四态见 [ACCEPTANCE_MATRIX.md](ACCEPTANCE_MATRIX.md) 第 0.7 节与本文件第 14 节。
 - 来源与合并规则：本文件将《Pi861 首版开发计划》（[IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)）确认的原 R1–R8，与《Pi861 本地 Agent 续开发提示词》（[HANDOFF_PROMPT_2026-09-22.md](HANDOFF_PROMPT_2026-09-22.md)）第 4–9 节的补充要求**合并细化**为编号子条目（如 R2.1、R2.2），不降低原范围；任务书新增要求（网页读取、失败重试、自动归组等）同样编号收录。
 - 每条需求的当前状态、代码入口、测试与证据见 [ACCEPTANCE_MATRIX.md](ACCEPTANCE_MATRIX.md)；本文只固定"要求什么、默认值是什么、行为是什么"。
 - 状态 taxonomy（六档，定义见 ACCEPTANCE_MATRIX.md）：**未实现 / 仅内核 / 已接入 / 受控协议验证通过 / 真实服务已验证 / 阻塞**。fixture 证明协议与安全行为，不证明真实模型任务质量。
@@ -237,3 +237,12 @@
 | P4-D | `p4-delivery`（L，证据/交付文档） | R5.11（隔离模式能力声明部分）；更新五份台账当前段与最终证据绑定 | P4-R |
 
 覆盖核对（P1-L 自检）：87 条 R 子项、8 条 G、10 条 AX 均至少落入一个工作包；O2/O4 已移出可选（第 11 节），O1/O3 为仅存可选项。映射不扩张任何授权：真实模型、真实 Brave、业务 MCP、跨主机验收仍待授权（K10 层）。
+
+## 14. 终态登记（2026-09-27 P4-D，绑定 SnapshotID-3）
+
+- 登记人：P4-D。权威输入：P4-R 最终独立审核（通过-本地必需范围）。本节只登记状态与残留，需求定义（第 1–10 节）不变、范围不降低；逐条四态以 [ACCEPTANCE_MATRIX.md](ACCEPTANCE_MATRIX.md) 第 0.7 节为表格权威。
+- **四态总况**：G1–G8、R1–R5、R8 全部条目与 R6/R7 除下列残留外均达**集成通过**；AX1–AX10 全部**集成通过 @ 5cacec62e**。本文件第 12 节首版统计与 ACCEPTANCE_MATRIX 第 0.2–0.6 节 2026-09-23 接手状态均为历史视图。
+- **登记残留（如实保留，不升格）**：R6.3 集成通过（4/5 转换，node-switch 无宿主事件）；R6.15 已接入（部分，StorageService 逐记录 DB 会话权威未作生产权威，TODO①）；R7.7 已接入（登记残留，web 引用会话内 ResultStore，TODO④）；R8.6 reviewer 复用 plannerModelId 配置面（TODO③）；R1.8 planner 只读子进程与 Worker 进程自身模型调用不经宿主 C3 计量（边界申报）。
+- **可选增强现状**：O1 pgvector 仍未实现且 fail-closed（启用即抛错，无装饰性开关）；O3 多搜索后端仍未实现（provider 字面量 "brave"）。O2/O4 已按第 11 节纠正为必需项并交付（R7.6 / K3）。
+- **待授权隔离**：真实付费模型、真实 Brave、业务 MCP、业务数据库、跨主机验收未获授权不计通过（K10 默认拒绝实测）；Linux 原生行为未验证。详见 [VERIFICATION_2026-09-27_CONTINUATION.md](VERIFICATION_2026-09-27_CONTINUATION.md) 第 4 节。
+- 本轮为本地必需范围完成；不构成"全场景生产就绪"声明。

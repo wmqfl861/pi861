@@ -182,6 +182,30 @@ SnapshotID = 基线完整 Git HEAD + 内容清单 SHA256（**不是 Git commit S
 
 没有任何条目处于"完成"状态；第 4 节历史统计不得与本表混用。工作包领取状态见 [DISPATCH_REGISTRY.md](DISPATCH_REGISTRY.md)。
 
+### 0.7 终态登记（2026-09-27 P4-D，绑定 SnapshotID-3；本节为当前权威视图）
+
+- 登记人：P4-D（slug `p4-delivery`，L 角色）。权威输入：P4-R 最终独立审核（`…\continuation-20260923-execution\P4-R\p4r-final\REPORT.md`，2026-09-27，判定通过-本地必需范围）。完整证据链与重现步骤见 [VERIFICATION_2026-09-27_CONTINUATION.md](VERIFICATION_2026-09-27_CONTINUATION.md)。
+- 版本锚：SnapshotID-3 = 基线 `d28044896a9ccd0bc81fb9a1d0d28eee7e9f86d5` + HEAD `5cacec62e2750214d99c5bba31659cf2f198fe21` + 143 文件内容清单 digest `88b5c12cf800365982b333abf3a741433958d55a983f5a4a62b437d76afbfb7f`（清单值为**原始文件字节 SHA256**；双独立复算 143/143 吻合）。AX 测试层（P3-X）= `df44a16d5`（被测运行时 ≡ 5cacec62e）。
+- 本节词表（四态，计划第 3 节）：**代码完成 / 审核通过 / 已接入 / 集成通过**，分别登记不相互替代。下表状态列 = 已达到的最高档，括号内为登记残留/边界（**如实保留，不升格**）。
+- 0.2–0.6 节（2026-09-23 P1-L 建档状态）自本节起转为历史接手视图，其中"入口待接/待补待证"等不再代表当前状态；第 1–4 节维持历史标注不变。
+
+| 组 | 条目与终态（87 R 子项 + G8 + AX10） |
+| --- | --- |
+| R1（9 条） | R1.1–R1.7、R1.9 **集成通过**（P2-A/P2-B 审核通过 @ aefa5d4a1；C3 计量服务接入；AX3 四组合/探测单飞/迟到取消全过）。R1.8 **集成通过（登记边界）**：接待/编译/提炼/planner 端口/独立 reviewer 均走共享 C3（P3-I 反例 1 RequestBudget 零调用 + P4-R wiring/host 实测）；边界=planner 只读子进程与 Worker 进程自身的模型调用不经宿主 C3 计量。R1.5 历史缺口闭合（pi861_model_route 强制 reason + signal 枚举，72/72 套件含路由证据用例）。 |
+| R2（10 条） | 全部 **集成通过**（AX3 覆盖 R2.1/R2.2/R2.6；AX4 覆盖 R2.4/R2.10——增量流 managedStream、半截参数零派发、稳定业务 id、丢回执 unknown 阻断；R2.7 裸连消除经 P3-I 反例 1 + P4-R 真实宿主 model-usage 断言）。 |
+| R3（13 条） | 全部 **集成通过**。R3.3 空闲唤醒（AX1 generation-2 同队列唤醒）；R3.7/R3.13 真实双 Worker + bundle/SHA256 运输校验（P4-R K7 实测双 pid）；R3.8 **集成通过（同机边界如实标注）**：真实 OCI 容器隔离实测（K7 isolation 7/7 含真容器 node:22-alpine），runtime 默认可信本地模式如实标注非沙箱；R3.9 单一集成执行权（AX9；`.intlock` 互斥为行为级**间接覆盖**，无直接磁盘观察断言——P3-X review-2 备注 2）。 |
+| R4（10 条） | 全部 **集成通过**（AX5 两份 Debug + 专项整合/更新/回滚/版本固定；R4.3 chooseSkillGroup 经 auxiliaryGrouping 真实接入安装流（compilers.ts:172）；R4.6 approvedBindings 强制传入（compilers.ts 无绑定即抛错，P4-R 源码核实）；R4.9 发布证据分层 + PI861_SKILL_CASES 受信 cases、缺失诚实失败）。 |
+| R5（12 条） | 全部 **集成通过**（AX6 懒加载/撤权/跨账户/同名/重复绑定/schema 漂移/隐藏名直调；R5.6 双传输 K5 30/30——计划文件名 `mcp-transports.integration.mjs` 未创建，覆盖由 live-mcp + mcp-http-fixture 两文件承担（C5 映射注记）；R5.8 受控引用 + 撤后不可读；R5.9 稳定业务操作 id + claim-once + resolve（AX4）；R5.10/R5.11 worker shell 门禁与两种隔离模式诚实区分）。 |
+| R6（18 条） | R6.1–R6.2、R6.4–R6.14、R6.16–R6.18 中除下列 2 条外全部 **集成通过**（AX7 跨会话/模型装配与递归撤回；AX8 同 requestId 确认 + 暂时失败恢复；R6.13/R6.14 K4 真 PG 17.11；R6.16 关键词基线含中文分词，pgvector **fail-closed**：`pgvector: true` 即抛"not implemented"，非装饰性开关，O1 如实）。R6.3 **集成通过（4/5 转换）**——node-switch 无宿主事件，登记 TODO。R6.15 **已接入（部分）**——运行时权威=文件 LayeredMemory + 状态级 PostgresStateStore，StorageService 逐记录 DB 会话权威未作生产权威（登记 TODO①，含显式迁移与 adoption 链）。 |
+| R7（7 条） | R7.1–R7.6 **集成通过**（K6 62/62；R7.6 网页正文读取为必需项已交付：web-read/web-host/web-extract-process 真实存在并实测，100ms 反例 102ms 收敛）。R7.7 **已接入（登记残留）**：web 引用当前为会话内 ResultStore（web-host.ts 默认，runtime 未注入持久 store），每次读取重新鉴权 + 撤权生效；持久化跨会话引用未接（登记 TODO④）。 |
+| R8（8 条） | 全部 **集成通过**（R8.1 GoalCommandService 全动词 new/status/edit/pause/resume/budget/unblock/accept/clear+cancel；R8.2/R8.8 AX2；R8.4 managedGoal 防双注册（P3-I 反例 5 + P4-R 真实宿主双加载拒载）；R8.5 AX9；R8.6 AX10 全链——reviewerId 独立身份已修复（runtime.ts:1182），reviewer 复用 plannerModelId 配置面为登记 TODO③；R8.7 未满并发原因解释（P2-G review-2 实测））。 |
+| G8 | **集成通过**：database.urlEnv / tokenEnv[] 仅存环境变量名；P4-R 全链 grep + 证据目录扫描零凭据。 |
+| AX1–AX10 | **全部集成通过 @ 5cacec62e**（P3-X k8-final 33/31/0/2 exit 0 + review-2 双重复跑 + 3 项破坏性负证（N1/N2/N3）按预期失败 + P4-R K4–K7 底座独立实跑交叉复验；2 skip 为 AX7/AX8 PG17 fixture 诚实层级标记，不推高通过）。 |
+
+登记残留全集（P4-D 采纳 P4-R 终判，不升格）：R1.8 计量边界、R6.3 node-switch TODO、R6.15 TODO①、R7.7 TODO④、R8.6 TODO③、stream-claims ledger 进程内不跨重启（MCP 业务回执已有持久 OperationJournal）、K 侧 bindingName 解析端口未导出（H 重实现公式，漂移=零派发）。P4-R 对上述各项的源码复核均属实，无虚报完成项。
+
+真实/模拟界限与待授权隔离（真实付费模型、真实 Brave、业务 MCP、业务数据库、跨主机、Linux 原生）见 VERIFICATION_2026-09-27_CONTINUATION.md 第 4 节；本地必需范围通过不等于全场景生产就绪。
+
 ## 1. 当前版本的检查链事实【历史（e3f07a789 基线）】（证据基线）
 
 CI run <https://github.com/wmqfl861/pi861/actions/runs/35687924923>（对应 e3f07a789 推送）：

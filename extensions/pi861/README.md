@@ -1,21 +1,23 @@
 # Pi861 runtime — 0.1.0-alpha.1
 
-首批实现，不是完整生产平台。计划位于 `docs/pi861/IMPLEMENTATION_PLAN.md`。
+首批实现 + 2026-09-23 续开发轮（continuation）收口。计划位于 `docs/pi861/IMPLEMENTATION_PLAN.md` 与 `docs/pi861/CONTINUATION_PLAN_2026-09-23.md`。
 这一扩展不替换 Pi 默认工作流，不自动安装其他编排器，也不加载外部 Agent 产品。
 
 ## 当前交付边界
 
+> 2026-09-27 更新（P4-D，绑定 SnapshotID-3：基线 d28044896 + HEAD 5cacec62e；逐条四态见 `docs/pi861/ACCEPTANCE_MATRIX.md` 第 0.7 节，证据链见 `docs/pi861/VERIFICATION_2026-09-27_CONTINUATION.md`）。本表为当前真实状态；旧表（"尚未接入真实 MCP 传输/LLM 整合器/缓冲推理"等）为基线旧文，已按终态更正。
+
 | 部分 | 状态 |
 | --- | --- |
-| `/goal` | 已实现 Pi 生命周期适配、次数限额、暂停/恢复/修改、证据报告、人工接受；通过模拟宿主测试及真实 Pi 0.86.1 无模型 RPC 加载/命令冒烟；真实模型目标推进仍未验证。 |
-| 联网搜索 | 已实现 Brave HTTP 适配与命令，默认关闭；固定地址、超时、取消、大小限制、来源和截断信息。HTTP 用模拟响应测试，未使用真实 API Key。 |
-| 自动记忆 | 已实现用户输入候选记录、关键词召回、手动确认/撤回、分层读取预算及分支恢复。尚无模型驱动的长期经验提炼、向量索引和自动摘要。 |
-| PostgreSQL | SQL 迁移与事务适配已实现，支持外部连接池；事务契约及真实 PostgreSQL 17 集成测试通过。不是完整认证服务。 |
-| 模型路由/故障恢复 | 可执行、已测试的选择策略、状态机和缓冲推理适配接口；尚未拦截 Pi 真实流式生成，也未连接健康探测定时器。 |
-| 持续任务调度 | 可执行的单所有者任务图、租约、写入范围和完成驱动补位，支持注入真实 Worker；尚未提供跨节点网络服务或进程/工作区沙箱。 |
-| Skill/MCP | 已实现原始归档、发布版本、分支条件、工具绑定与调用时授权检查的内核；尚未接入 Pi 默认 Skill 发现、LLM 整合器和真实 MCP 传输。 |
+| `/goal` | 完整 runtime 入口驱动持久 Goal 队列（GoalCommandService 全动词：new/status/edit/pause/resume/budget/unblock/accept/clear/cancel）；AX10 闭环实测：真实 Pi 宿主 → 只读 planner 子进程 → 真实 PG17 协调者 → 两个真实同机 Pi Worker → 审核失败注入与返工 → 受控集成 → 人工接受。模型为确定性 fixture，真实模型目标推进仍未验证。 |
+| 联网搜索与网页读取 | Brave 适配与命令保留（默认关闭，未用真实密钥）；网页正文读取已交付（web-read/web-control + 受控抽取子进程）：授权前 DNS/连接零发生、DNS rebinding/私网/元数据/重定向/解压炸弹防护、100ms 预算实测 102ms 收敛。真实 Brave 调用待授权。 |
+| 自动记忆 | 输入候选记录、关键词召回（含中文分词）、确认/撤回保留；新增工具结果即时采集、模型驱动提炼（持久任务/租约/暂时失败有界恢复；跨会话/跨模型/跨节点装配经 AX7/AX8 实测）、超大/敏感结果受控引用。pgvector 未实现（fail-closed：启用即报错）。 |
+| PostgreSQL | 真实 PostgreSQL 17 集成测试通过（迁移、并发 CAS、RLS、递归撤回、断连/unknown/备份恢复、TLS）；逐记录 storage-service 存在但未作运行时生产权威（登记残留 R6.15，运行时权威=文件 LayeredMemory + 状态级 PostgresStateStore）。不是完整认证服务。 |
+| 模型路由/故障恢复 | 统一 model-service/health-service 已接入宿主（请求计量 C3、failover/failback 四组合、探测单飞与预算）；增量流式（managedStream：半截工具参数零派发、迟到响应无执行权、丢回执进 unknown 核对）。登记边界：planner 只读子进程与 Worker 进程自身的模型调用不经宿主 C3 计量。 |
+| 持续任务调度 | 持久队列持续补位、空闲追加唤醒、滚动规划（低水位 + 版本 CAS）、独立 reviewer、两个真实同机 Worker 进程（独立检出/token，git bundle + SHA256 运输校验）；OCI 容器隔离模式真实可用（Linux 容器实测）。跨主机多节点未验证；可信本地模式如实标注非 OS 沙箱。 |
+| Skill/MCP | 自动能力归组（chooseSkillGroup 接入安装流）、LLM 整合器（编译输入强制 approvedBindings）、发布版本分层/回滚/运行中版本固定、懒加载与撤权/跨账户/同名/重复绑定/schema 漂移防护；真实 MCP 双传输（stdio 子进程 + HTTP/SSE）已接入并实测。 |
 
-不要将后四项核心实现误读为启动扩展就自动具备完整多模型/多节点系统。
+多节点为同机多进程（loopback、独立检出），不冒充跨主机验证；全部模型面为确定性 fixture，不宣称真实智能质量；真实付费模型/真实 Brave/业务 MCP/业务数据库验收未授权未运行。不要把上述本地验证读作全场景生产就绪。
 
 ## 启动
 
@@ -146,16 +148,28 @@ PI861_TEST_DRIVER_ROOT=/path/to/isolated-pg-install \
 node --experimental-strip-types --test test/postgres.integration.mjs
 ```
 
-已在 GitHub Actions 通过根 `npm run check`、真实 Pi 无模型冒烟与 PostgreSQL 集成，
-并单独通过 97 项确定性测试和扩展类型检查。锁定的源码版本及测试范围见
-[`验证报告`](../../docs/pi861/VERIFICATION.md)。这些检查不等于真实多模型/多节点业务验收。
+历史 alpha 批次（绑定 `90295c195`）的 CI 记录见
+[`验证报告`](../../docs/pi861/VERIFICATION.md)（历史证据）。
+2026-09-23 续开发轮的全部验证为**本地独立实跑**（分支未 push，本轮无 CI 运行，不以文档日期充当通过日期），
+检查链结论、需求覆盖终判与干净检出重现步骤见
+[`续开发验证报告`](../../docs/pi861/VERIFICATION_2026-09-27_CONTINUATION.md)。
+这些检查不等于真实多模型/多节点业务验收。
 
-全仓检查前需按原仓库生成模型目录类型：
+全仓检查前需按原仓库生成模型目录数据。两种方式：
+`npm --prefix packages/ai run generate-models` 会连源码类型一起重生成；
+**干净复现推荐数据水合**（只补 gitignored 数据目录，不改动已提交的 `models.generated.ts`）：
 
 ```sh
 npm ci --ignore-scripts
-npm --prefix packages/ai run generate-models
+npm run hydrate:model-data
 npm run check
+```
+
+对照已发布 Pi 类型（`tsconfig.host.json`）前，需在本目录安装精确锁定的发布包（环境步骤，缺此步 44 个 "Cannot find module" 错）：
+
+```sh
+npm install --no-save --ignore-scripts @earendil-works/pi-coding-agent@0.86.1
+node ../../node_modules/typescript/bin/tsc -p tsconfig.host.json
 ```
 
 无模型 Pi 宿主冒烟可独立运行：

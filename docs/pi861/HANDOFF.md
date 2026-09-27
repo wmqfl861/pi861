@@ -1,7 +1,17 @@
 # Pi861 交接说明（HANDOFF）
 
 - 首版日期：2026-09-22（P1 阶段交付，随五份台账首版建立；后续每个阶段更新）。
-- 代码基线：`e3f07a789b7648f26ec72ce65fa5856046dbd6d3`（分支 `feat/pi861-runtime-v1`，与 main `c7cdb460a` 隔离，未合并）。
+- 代码基线（首版）：`e3f07a789b7648f26ec72ce65fa5856046dbd6d3`（分支 `feat/pi861-runtime-v1`，与 main `c7cdb460a` 隔离，未合并）。
+
+## 2026-09-27 continuation 收口（P4-D 交付登记）
+
+- **终态锚（SnapshotID-3）**：基线 `d28044896a9ccd0bc81fb9a1d0d28eee7e9f86d5` + 最终 HEAD `5cacec62e2750214d99c5bba31659cf2f198fe21`（分支 `feat/pi861-runtime-v1-cont-20260923-p3-integration`，46 commits，工作树 clean）+ 143 文件内容清单 digest `88b5c12cf800365982b333abf3a741433958d55a983f5a4a62b437d76afbfb7f`（原始文件字节 SHA256，双独立复算 143/143）。AX 测试层（P3-X）= `df44a16d5`（被测运行时 ≡ 5cacec62e）。
+- **P4-R 终审结论**：通过（本地必需范围）——K1–K7 全部独立实跑通过（K1 附 tsgo 22 错/live-guard EPERM 两项三重证据环境定性）、K8 证据审计 + 交叉复验 AX1–AX10 集成通过、K10 默认拒绝自证。报告：`C:\Albert\project\pi861-briefs\continuation-20260923-execution\P4-R\p4r-final\REPORT.md`（42 份日志 + 5 件核验产物）。
+- **本轮验证报告（新增唯一序号，旧 VERIFICATION.md 未动）**：[VERIFICATION_2026-09-27_CONTINUATION.md](VERIFICATION_2026-09-27_CONTINUATION.md)——检查链结论表、需求覆盖终判、真实/模拟界限、待授权隔离清单、干净检出重现步骤（含 hydrate 与 K3 published 安装两步前置）、启动命令与脱敏配置示例、C1–C7 处置记录。
+- **台账终态更新（P4-D）**：ACCEPTANCE_MATRIX 第 0.7 节（四态覆盖终判，登记残留不升格）、REQUIREMENTS 第 14 节、ARCHITECTURE 第 10 节、CONFIGURATION 第 11 节、DISPATCH_REGISTRY 全表、README"当前交付边界"。`p1-ledger` 分支台账（@5349ace1a）已合入本分支，仓库内保持单一权威。
+- **仓库状态**：16 个 cont 分支 + 6 个 pi861/* 旧分支 LOCAL_ONLY（另 2 分支与基线同 commit 被远端基线包含，非新增推送）；主树 70 项预存 dirty 为 P0-A 保全原输入；本收口位于分支 `feat/pi861-runtime-v1-cont-20260923-p4-delivery`（worktree `C:\Albert\project\pi861-cont-20260923\p4-delivery`），本地提交未 push——推送由主会话在文档独立审核通过后统一执行。
+- **登记残留与待授权**：R6.3 / R6.15(TODO①) / R7.7(TODO④) / R8.6(TODO③) / R1.8 边界 / stream-claims 跨重启 / bindingName 端口导出（详见 ACCEPTANCE_MATRIX 0.7）；真实付费模型、真实 Brave、业务 MCP、业务数据库、跨主机、Linux 原生行为待授权/待环境（VERIFICATION 第 4 节）。本地必需范围通过 ≠ 全场景生产就绪。
+- **下一步**：① 文档独立审核者（未参与本轮实现/测试/审核）按 VERIFICATION 第 5 节复现并核对结论与证据；② 审核通过后主会话统一授权推送；③ 残留项与 K10 授权验收按 DISPATCH_REGISTRY 就绪谓词另行领取。
 
 ## 2026-09-23 continuation 接手段（P1-L 登记）
 

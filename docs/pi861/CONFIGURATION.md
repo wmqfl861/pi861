@@ -243,3 +243,14 @@ pi -e ./extensions/pi861/runtime.ts
 3. **配置继承收紧原则（C1）**：全局默认→项目/岗位→Agent→子 Agent 的继承体系由 P1-C/P1-S 落地；任何覆盖只能收紧权限上限，不得扩张（对应 R1.7/R6.18，见第 5 节"未实现"项的演进落点）。
 4. **新增入口与检查面**：计划新增 `scripts/storage-service.mjs`（P2-D）、`scripts/worker-service.mjs`（P2-W）、`src/live/web-extract-process.ts` 或等效受控抽取入口（P2-E）、`scripts/run-acceptance.mjs` 的 CLI 合同 `--suite <unit|hosts|pg17|mcp|web|workers|ax|local> --manifest <绝对路径> --evidence <绝对路径>`（P1-Q，待实现合同，现脚本不支持）。以上入口由 T 纳入生产入口清单与检查链（K0–K9 组定义见计划第 7 节），测试环境变量（`PI861_TEST_SOURCE_HOST` 等）沿用计划第 7 节与 HANDOFF 2026-09-22 段记录。
 5. **外部真实服务脚本默认关闭**：真实模型/Brave/业务 MCP 验收脚本属 K10 层，默认关闭、需显式授权，凭据变量名、预算上限、允许数据、清理方法与拒绝默认执行行为须经审核；未授权不得伪装为 skip 后通过（计划第 8 节）。
+
+## 11. 终态登记（2026-09-27 P4-D，绑定 SnapshotID-3 = 基线 d28044896 + HEAD 5cacec62e）
+
+第 1–9 节为首版配置面描述（历史视图，其中 7.3 节"完整入口因 TS1005 不能通过类型检查"已被 K3 两类宿主全过取代）；第 10 节为计划登记。本节登记**实际交付的配置面终态**，逐条证据见 [VERIFICATION_2026-09-27_CONTINUATION.md](VERIFICATION_2026-09-27_CONTINUATION.md)。
+
+1. **第 10 节所列新增入口全部落地**：`scripts/storage-service.mjs`（P2-D）、`scripts/worker-service.mjs`（P2-W，双进程 K7 实测）、`src/live/web-extract-process.ts` 受控抽取入口（P2-E，100ms 预算 102ms 收敛实测）、`scripts/run-acceptance.mjs` 的 `--suite <unit|hosts|pg17|mcp|web|workers|ax|local> --manifest <绝对路径> --evidence <绝对路径>` CLI 合同（P1-Q 交付）。以上均已纳入 P0-T 生产入口清单与检查链。
+2. **新检查/环境步骤（干净检出必做，C2/C3 文档化）**：仓库根 `npm run hydrate:model-data`（补 gitignored 模型数据目录；缺此步 tsc entries 90 错 / tsgo 829 错）；K3 published 类型检查前在 `extensions/pi861` 执行 `npm install --no-save --ignore-scripts @earendil-works/pi-coding-agent@0.86.1`（精确锁定；缺此步 tsconfig.host.json 44 错）。完整重现步骤见 VERIFICATION 第 5 节。
+3. **PG17 fixture 环境面**：`PI861_PG17_TESTS=1` 经 `test/fixtures/pg17.mjs` 起独立 postgres:17 容器（随机端口/名称，版本门 [170000,180000)，受限迁移/运行角色）；测试注入 `PI861_TEST_POSTGRES_URL`（仅 loopback `pi861_test`）/ `PI861_ALLOW_TEST_DATABASE=1` / `PI861_TEST_DRIVER_ROOT`（隔离驱动根，P4-R 用自装 pg@8.23.0）。TLS 远程验证经 `PI861_PG_CA_FILE`（P2-D review-2 实测存证）。
+4. **依赖变化**：本轮新增仅 `@types/pg@8.23.1`（dev，MIT，锁文件精确固定）；扩展零新增运行时依赖；`pg` 测试驱动为隔离安装不进根依赖（沿用 CI 配方 pg@8.16.3 约定的示例路径除外）。
+5. **宿主/Worker/AX 环境变量沿用登记**：`PI861_REQUIRE_HOST_TESTS` / `PI861_TEST_PI_CLI` / `PI861_TEST_SOURCE_HOST`（K3，缺配置显式失败非 skip）；`PI861_AX_COMPOSITE_SNAPSHOT`（AX 声明式锚定——测试只查非空，树绑定由 manifest 比对补强，未来注记：将清单 digest 校验纳入 harness）。
+6. **K10 默认关闭终态**：`scripts/real-acceptance/{real-model,real-search,real-mcp}.mjs` 无授权 env 时输出 deferred/0 请求（3/3 实测）；授权与凭据边界见计划第 8 节，未授权不计通过。
