@@ -1,4 +1,5 @@
-import { digest } from "./memory.ts";
+import { isValidScope } from "./contracts/identity.ts";
+import { digest, type MemoryItem, type MemoryReceipt, type MemoryWrite } from "./memory.ts";
 
 export interface ResultMetadata {
 	kind: "search" | "web-read";
@@ -110,4 +111,284 @@ export function packResult(
 	if (!options.store)
 		throw new Error("Result exceeds the inline limit and no controlled-reference store is configured");
 	return { inline: false, ...options.store.store(text, owner, options.metadata), complete: false };
+}
+
+// ---------------------------------------------------------------------------
+// P2-M durable controlled-reference backend (C7). The session-local ResultStore
+// above is the P2-E inline seam; entries die with the host process. This backend
+// stores the payload through the memory authority (P2-D record model) so an
+// existing reference stays readable across sessions and nodes, and a withdrawal
+// (grant loss, revocation) makes later reads fail uniformly on every node -
+// missing, revoked and out-of-scope references are indistinguishable.
+// ---------------------------------------------------------------------------
+
+/** Wider descriptor shape; a web `ResultMetadata` satisfies it structurally. */
+export interface ResultDescriptor {
+	kind: string;
+	scope: string;
+	url?: string;
+	tool?: string;
+	sourceComplete: boolean;
+}
+
+/** Minimal authority surface satisfied by LayeredMemory, PostgresMemory and StorageSession. */
+export interface PersistentResultAuthority {
+	get(scope: string, id: string): Promise<MemoryItem | undefined>;
+	put(input: MemoryWrite): Promise<MemoryReceipt>;
+	withdraw(requestId: string, scope: string, id: string, expectedRevision: number): Promise<MemoryReceipt>;
+}
+
+export interface PersistentResultOptions {
+	/** Canonical scopes probed on read; only records in a readable scope resolve. */
+	scopes: string[];
+	pageSize?: number;
+	maxCharacters?: number;
+}
+
+/** Records cap at MAX_MEMORY_BYTES; chunk with margin so descriptor overhead never overflows. */
+const PERSISTENT_CHUNK_BYTES = 240_000;
+export const PERSISTENT_RESULT_MAX_CHARACTERS = 4_194_304;
+
+interface StoredDescriptor {
+	format: 1;
+	reference: { resultRef: string; owner: string; bytes: number; totalCharacters: number };
+	descriptor: ResultDescriptor;
+	lengths: number[];
+}
+
+function splitByBytes(text: string, maxBytes: number): string[] {
+	if (Buffer.byteLength(text, "utf8") <= maxBytes) return [text];
+	const chunks: string[] = [];
+	let start = 0;
+	while (start < text.length) {
+		let end = Math.min(text.length, start + maxBytes);
+		while (end > start && Buffer.byteLength(text.slice(start, end), "utf8") > maxBytes) end--;
+		// Never split a surrogate pair: a combined code point at end-1 means the boundary sits inside one.
+		if (end > start && end < text.length && (text.codePointAt(end - 1) ?? 0) > 0xffff) end--;
+		if (end <= start) throw new Error("Result chunk budget too small for a single character");
+		chunks.push(text.slice(start, end));
+		start = end;
+	}
+	return chunks;
+}
+
+function chunkIdentity(owner: string, resultRef: string, index: number): string {
+	return digest(["pi861.result.chunk", owner, resultRef, index]);
+}
+
+function storedDescriptor(item: MemoryItem): StoredDescriptor | undefined {
+	try {
+		const parsed: unknown = JSON.parse(item.overview);
+		if (!parsed || typeof parsed !== "object") return undefined;
+		const body = parsed as Partial<StoredDescriptor>;
+		const reference = body.reference as Partial<StoredDescriptor["reference"]> | undefined;
+		const descriptor = body.descriptor as Partial<ResultDescriptor> | undefined;
+		if (
+			body.format !== 1 ||
+			typeof reference?.resultRef !== "string" ||
+			typeof reference.owner !== "string" ||
+			typeof reference.bytes !== "number" ||
+			!Number.isSafeInteger(reference.bytes) ||
+			typeof reference.totalCharacters !== "number" ||
+			!Number.isSafeInteger(reference.totalCharacters) ||
+			!descriptor ||
+			typeof descriptor.kind !== "string" ||
+			typeof descriptor.scope !== "string" ||
+			descriptor.scope !== item.scope ||
+			typeof descriptor.sourceComplete !== "boolean" ||
+			!Array.isArray(body.lengths) ||
+			!body.lengths.every((length) => typeof length === "number" && Number.isSafeInteger(length) && length >= 0)
+		)
+			return undefined;
+		return {
+			format: 1,
+			reference: {
+				resultRef: reference.resultRef,
+				owner: reference.owner,
+				bytes: reference.bytes,
+				totalCharacters: reference.totalCharacters,
+			},
+			descriptor: {
+				kind: descriptor.kind,
+				scope: descriptor.scope,
+				...(descriptor.url !== undefined ? { url: String(descriptor.url) } : {}),
+				...(descriptor.tool !== undefined ? { tool: String(descriptor.tool) } : {}),
+				sourceComplete: descriptor.sourceComplete,
+			},
+			lengths: body.lengths as number[],
+		};
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Durable controlled references over the memory authority. Content is chunked
+ * into bounded evidence records; the resultRef formula matches the session-local
+ * store (digest of value+owner+metadata) so a reference minted inline resolves
+ * to the same durable record once persisted.
+ */
+export class PersistentResultStore {
+	private readonly backend: PersistentResultAuthority;
+	private readonly scopes: string[];
+	private readonly pageSize: number;
+	private readonly maxCharacters: number;
+	constructor(backend: PersistentResultAuthority, options: PersistentResultOptions) {
+		if (
+			!options.scopes.length ||
+			!options.scopes.every(isValidScope) ||
+			(new Set(options.scopes).size !== options.scopes.length)
+		)
+			throw new Error("Persistent result scopes must be distinct canonical scopes");
+		const pageSize = options.pageSize ?? 16_000;
+		const maxCharacters = options.maxCharacters ?? PERSISTENT_RESULT_MAX_CHARACTERS;
+		if (
+			!Number.isSafeInteger(pageSize) ||
+			pageSize < 1 ||
+			!Number.isSafeInteger(maxCharacters) ||
+			maxCharacters < 1 ||
+			maxCharacters > PERSISTENT_RESULT_MAX_CHARACTERS
+		)
+			throw new Error("Invalid persistent result limits");
+		this.backend = backend;
+		this.scopes = [...options.scopes];
+		this.pageSize = pageSize;
+		this.maxCharacters = maxCharacters;
+	}
+
+	/**
+	 * Persists the payload as bounded evidence records. Identical re-stores are
+	 * idempotent: the reference is content-addressed, missing chunks are written
+	 * and existing ones are left untouched (crash-safe fill-in, never an overwrite).
+	 */
+	async store(text: string, owner: string, descriptor: ResultDescriptor): Promise<StoredResultReference> {
+		if (!owner) throw new Error("Result owner identity required");
+		if (!text.length || text.length > this.maxCharacters) throw new Error("Result exceeds controlled-reference storage limit");
+		if (!descriptor.kind || !isValidScope(descriptor.scope) || typeof descriptor.sourceComplete !== "boolean")
+			throw new Error("Invalid result descriptor");
+		// Same digest input as the session-local store when descriptor is a web ResultMetadata.
+		const resultRef = digest({ value: text, owner, metadata: descriptor });
+		const chunks = splitByBytes(text, PERSISTENT_CHUNK_BYTES);
+		const stored: StoredDescriptor = {
+			format: 1,
+			reference: { resultRef, owner, bytes: Buffer.byteLength(text, "utf8"), totalCharacters: text.length },
+			descriptor,
+			lengths: chunks.map((chunk) => chunk.length),
+		};
+		let complete = true;
+		for (const [index, chunk] of chunks.entries()) {
+			const id = chunkIdentity(owner, resultRef, index);
+			const existing = await this.backend.get(descriptor.scope, id);
+			if (existing) continue;
+			complete = false;
+			const item = {
+				id,
+				scope: descriptor.scope,
+				kind: "evidence" as const,
+				status: "candidate" as const,
+				abstract: `Controlled result reference ${resultRef.slice(0, 12)} part ${index + 1}/${chunks.length}`,
+				overview: JSON.stringify(stored),
+				full: chunk,
+				source: { kind: "tool" as const, ref: `result:${resultRef}` },
+			};
+			await this.backend.put({
+				requestId: digest(["pi861.result.put", owner, resultRef, index]),
+				expectedRevision: null,
+				item,
+			});
+		}
+		if (complete) return { resultRef, bytes: stored.reference.bytes, totalCharacters: stored.reference.totalCharacters };
+		const first = await this.backend.get(descriptor.scope, chunkIdentity(owner, resultRef, 0));
+		if (!first) throw new Error("Controlled reference chunk missing after write");
+		return { resultRef, bytes: stored.reference.bytes, totalCharacters: stored.reference.totalCharacters };
+	}
+
+	/** Uniformly fails for unknown, foreign-owner, withdrawn and out-of-scope references. */
+	async read(resultRef: string, owner: string, offset = 0): Promise<StoredResultPage> {
+		const located = await this.locate(resultRef, owner);
+		if (!Number.isSafeInteger(offset) || offset < 0 || offset > located.lengths.reduce((a, b) => a + b, 0))
+			throw new Error("Invalid result offset");
+		let page = "";
+		let chunkStart = 0;
+		for (const [index, length] of located.lengths.entries()) {
+			const chunkEnd = chunkStart + length;
+			if (chunkEnd <= offset) {
+				chunkStart = chunkEnd;
+				continue;
+			}
+			const item = await this.mustRead(located.scope, chunkIdentity(owner, resultRef, index), resultRef);
+			const from = Math.max(0, offset - chunkStart);
+			page += item.full.slice(from, from + (this.pageSize - page.length));
+			chunkStart = chunkEnd;
+			if (page.length >= this.pageSize) break;
+		}
+		const totalCharacters = located.lengths.reduce((a, b) => a + b, 0);
+		return {
+			resultRef,
+			text: page,
+			offset,
+			nextOffset: Math.min(totalCharacters, offset + page.length),
+			totalCharacters,
+			complete: offset + page.length >= totalCharacters,
+			sourceComplete: located.descriptor.sourceComplete,
+			untrusted: true,
+		};
+	}
+
+	async metadata(resultRef: string, owner: string): Promise<ResultDescriptor> {
+		const located = await this.locate(resultRef, owner);
+		return { ...located.descriptor };
+	}
+
+	/**
+	 * Revocation through the record model: every chunk is withdrawn, so the
+	 * tombstone propagates on every node and later reads fail uniformly.
+	 * Returns the number of live chunks withdrawn; revoking an already-revoked
+	 * (or unknown) reference is an idempotent no-op returning zero.
+	 */
+	async revoke(requestId: string, resultRef: string, owner: string): Promise<number> {
+		let located: Awaited<ReturnType<PersistentResultStore["locate"]>>;
+		try {
+			located = await this.locate(resultRef, owner);
+		} catch (error) {
+			if (error instanceof Error && error.message === "Result not found") return 0;
+			throw error;
+		}
+		let withdrawn = 0;
+		for (const index of located.lengths.keys()) {
+			const id = chunkIdentity(owner, resultRef, index);
+			const item = await this.backend.get(located.scope, id);
+			if (!item) continue;
+			await this.backend.withdraw(`${requestId}:${index}`, located.scope, id, item.revision);
+			withdrawn++;
+		}
+		return withdrawn;
+	}
+
+	private async locate(
+		resultRef: string,
+		owner: string,
+	): Promise<{ scope: string; descriptor: ResultDescriptor; lengths: number[] }> {
+		if (!resultRef || !owner) throw new Error("Result not found");
+		for (const scope of this.scopes) {
+			const item = await this.backend.get(scope, chunkIdentity(owner, resultRef, 0));
+			if (!item) continue;
+			const stored = storedDescriptor(item);
+			if (
+				!stored ||
+				stored.reference.resultRef !== resultRef ||
+				stored.reference.owner !== owner ||
+				stored.lengths.some((length) => length > PERSISTENT_CHUNK_BYTES + 4)
+			)
+				throw new Error("Result not found");
+			return { scope, descriptor: stored.descriptor, lengths: stored.lengths };
+		}
+		throw new Error("Result not found");
+	}
+
+	private async mustRead(scope: string, id: string, resultRef: string): Promise<MemoryItem> {
+		const item = await this.backend.get(scope, id);
+		if (!item || item.source.ref !== `result:${resultRef}`) throw new Error("Result not found");
+		return item;
+	}
 }
