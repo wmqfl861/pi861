@@ -154,3 +154,11 @@ active ⇄ paused、active→review→completed、任意→cancelled。派发前
 8. 提炼 failed 任务永久滞留（R6.9）。
 9. outbox 已写入但无消费者；索引/摘要重建链路未闭合（R6.11 备注）。
 10. 扩展依赖宿主进程存活；宿主关闭后无后台运行（R8 边界，README 已声明）。
+
+## 9. 本轮共享接口与唯一所有者登记（2026-09-23 continuation，P1-L）
+
+- 本节为**计划登记**，不是当前实现状态：第 1–8 节仍描述 e3f07a789/主树 dirty 的真实结构。下述边界由续开发计划第 4 节确定，P1-C 负责将 C1–C7 写成冻结接口清单与契约测试；实现者发现实质冲突走补充规划，不得由主会话临时重设计。计划指针与 SHA256 见 [HANDOFF.md](HANDOFF.md) 本轮段。
+- 契约冻结（名称｜提供者→消费者，全文见计划第 4 节）：C1 身份与配置（P1-C 定义；P1-S 解析；全员消费）｜C2 生命周期（P1-C；M1/M3/M4/MCP 消费）｜C3 预算与容量（P2-A 计量、P2-D 原子存储、P2-G 容量）｜C4 持久提交（P2-D 唯一存储实现）｜C5 能力与操作（P2-S 实现；模型/Goal/引用消费）｜C6 记忆（P2-M 服务、P2-D 持久化）｜C7 产物与验收（P1-Q 证据、P2-M 引用、P2-G 验收消费）。冻结产物=接口版本+源码 SHA256+运行时校验规则+契约测试版本+消费者清单，不得以"都使用 C1–C7"替代版本锁定。
+- 共享文件唯一写入所有者（相对 `extensions/pi861/`，注明者除外；完整协作规则见计划第 4 节表）：H=P0-H/P3-I（runtime.ts、index.ts、宿主组合测试）；C=P1-C（src/contracts/**、test/contracts-*.test.mjs）；S=P1-S（compilers、runtime-configuration、deadline、line-process 及单测）；A=P2-A/P2-B（routing、model-runtime/model-service/health-service/stream-bridge 及测试）；K=P2-S（capabilities、skill-repository/skills-host/skill-validation/mcp/operations 及测试）；D=P2-D（store、postgres、新增存储服务、全部 SQL/迁移、PG 示例）；M=P2-M（memory、layered-memory、result-store、记忆/引用服务及测试）；G=P2-G（goal、scheduler、coordinator/project-runner/goal-command 及测试）；W=P2-W（pi-rpc/remote-worker/workspace/worker-guard/worker-service、Worker 启动入口）；E=P2-E（search/web-control/web-read/web-host、抽取子进程及网页测试）；T=P0-T（根配置、依赖、lock/shrinkwrap、全部 tsconfig、扩展 package 入口、CI）；Q=P1-Q/P3-X（test/fixtures/**、acceptance/real-acceptance、跨模块集成测试）；L=P1-L/P4-D（五份台账、包登记、证据索引）。
+- 特别登记：`runtime.ts` 主树版本与旧 integration-check 副本不同，只能由 H 依完整差异合成并记录每段来源，禁止整目录"取最新"覆盖。所有者是职责不是并发许可；更换所有者须先停旧写入、存快照、登记交接。新文件按所属服务归属，不得新建共享服务绕过唯一所有权。
+- 纵向行为（模型链/Skill-MCP 链/记忆-PG 链/Goal 链/Worker 隔离/网页链）的完整判定以计划第 4 节原文为准；其中网页正文抽取必须置于可强制终止的受控子进程边界，禁止同事件循环 `Promise.race` 假超时。
