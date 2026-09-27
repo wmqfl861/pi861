@@ -56,10 +56,20 @@ async function waitForReady(containerName, migrator, timeoutMs = 90_000) {
 	const started = Date.now();
 	while (Date.now() - started < timeoutMs) {
 		try {
-			const ready = await docker("exec", containerName, "pg_isready", "-U", migrator, "-d", "pi861_test");
+			// Readiness must be probed over TCP only (-h 127.0.0.1). On a fresh volume the
+			// image entrypoint first starts a TEMPORARY server with listen_addresses='' that
+			// listens on the Unix socket alone and also answers "accepting connections";
+			// probing the socket (the psql default) can mistake that temporary server for
+			// ready, and the CREATE ROLE below then lands in the temporary-server-shutdown /
+			// final-server-start gap and fails (review-2 N1: "the database system is shutting
+			// down" / socket "No such file or directory"). The temporary server never listens
+			// on TCP, so an accepted TCP connection means the final server is up; every
+			// listen socket (TCP and Unix) is created before the server accepts, so the
+			// socket-mode psql calls after this point cannot hit the gap.
+			const ready = await docker("exec", containerName, "pg_isready", "-h", "127.0.0.1", "-p", "5432", "-U", migrator, "-d", "pi861_test");
 			if (ready.stdout.includes("accepting connections")) return;
 		} catch {
-			// container or postgres still starting
+			// container, postgres, or its TCP listener still starting
 		}
 		await new Promise((resolve) => setTimeout(resolve, 500));
 	}
@@ -98,7 +108,7 @@ export async function startPg17Fixture(options = {}) {
 		const portOutput = await docker("port", containerName, "5432");
 		const port = Number(/127\.0\.0\.1:(\d+)/.exec(portOutput.stdout)?.[1] ?? Number.NaN);
 		if (!Number.isSafeInteger(port) || port <= 0) throw new Error(`Could not determine the fixture port mapping: ${portOutput.stdout.trim()}`);
-		const versionOutput = await docker("exec", containerName, "psql", "-U", migrator, "-d", database, "-tAc", "SELECT server_version_num");
+		const versionOutput = await docker("exec", containerName, "psql", "-U", migrator, "-d", database, "-tAc", "SHOW server_version_num");
 		const serverVersionNum = Number(versionOutput.stdout.trim());
 		const fixture = {
 			containerName,
