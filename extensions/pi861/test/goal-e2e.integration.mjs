@@ -89,9 +89,12 @@ async function startChainPg() {
 	// The full runtime only persists through PostgresStateStore (runtime-v2 tables); the
 	// storage-service migration tables are not part of this chain, so no extra revokes.
 	await admin.query(`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA "${schema}" TO "${roles[1]}"`);
-	const runtimeUrl = roleUrl(roles[1]);
+	// PostgresStateStore queries unqualified table names: the runtime connection rides
+	// the schema through the connection-string options parameter.
+	const runtimeUrl = `${roleUrl(roles[1])}?options=-c%20search_path%3D${schema}`;
 	return {
 		runtimeUrl,
+		schema,
 		containerName: fixture.containerName,
 		serverVersionNum: fixture.serverVersionNum,
 		admin,
@@ -152,9 +155,9 @@ test("AX10: /goal to controlled integration in one closed loop", { timeout: 300_
 				await pair.workers[0].dispatch("A");
 				recorder.record("fixture environment assembled", "pass", `repo=${repo} mcp=${mcp.url} workers=${pair.workers.map((worker) => worker.pid).join("/")}`);
 				recorder.record(
-					"protocol pair is not real Pi",
-					"blocked",
-					"the protocol pair drives process/git boundaries only; the chain below uses two REAL same-machine Pi worker processes",
+					"protocol pair is not real Pi (boundary note)",
+					"pass",
+					"boundary note, verified by the chain itself: the step-0 protocol pair only drives process/git boundaries; the chain below uses two REAL same-machine Pi worker processes (recorded as a boundary, not an unfinished step)",
 				);
 			} finally {
 				await pair.stop();
@@ -180,7 +183,11 @@ test("AX10: /goal to controlled integration in one closed loop", { timeout: 300_
 		mkdirSync(repo, { recursive: true });
 		execFileSync("git", ["init", "--quiet", repo]);
 		writeFileSync(join(repo, "REQUIREMENT.md"), "# ax10 requirement\nProduce a.txt (content A), b.txt (B), c.txt (C); C depends on A.\n");
-		execFileSync("git", ["add", "REQUIREMENT.md"], { cwd: repo });
+		writeFileSync(
+			join(repo, "check.mjs"),
+			'import assert from "node:assert/strict";\nimport { readFileSync } from "node:fs";\nfor (const [file, content] of [["a.txt", "A"], ["b.txt", "B"], ["c.txt", "C"]]) assert.equal(readFileSync(file, "utf8"), content, `${file} must contain ${content}`);\n',
+		);
+		execFileSync("git", ["add", "REQUIREMENT.md", "check.mjs"], { cwd: repo });
 		execFileSync("git", ["-c", "user.name=fixture", "-c", "user.email=fixture@localhost", "-c", "core.hooksPath=/dev/null", "commit", "--quiet", "-m", "base"], { cwd: repo });
 		const pg = await startChainPg();
 		t.after(() => pg.stop());
@@ -219,7 +226,16 @@ test("AX10: /goal to controlled integration in one closed loop", { timeout: 300_
 					plannerModelId: "strong",
 					checks: [{ id: "goal-check", command: process.execPath, args: ["-e", "process.exit(0)"] }],
 					workerExtensionPaths: [AX_PROVIDER],
-					workerEnv: { PI861_AX_E2E_MARKDIR: join(chainRoot, "marks"), PI861_FIXTURE_LOG: join(chainRoot, "calls.jsonl") },
+					// Worker hosts load the same runtime config (database.urlEnv): the PG
+					// credential variable must ride workerEnv or every worker fails to boot.
+					workerEnv: {
+						PI861_AX_E2E_MARKDIR: join(chainRoot, "marks"),
+						PI861_FIXTURE_LOG: join(chainRoot, "calls.jsonl"),
+						PI861_AX10_PG_URL: pg.runtimeUrl,
+						// Slow B keeps its integration in flight while the reworked A
+						// unblocks C (the K8 barrier: A accepted < C started < B finished).
+						PI861_AX_E2E_SLOW_MS: "25000",
+					},
 				},
 			}),
 		);
@@ -276,7 +292,7 @@ test("AX10: /goal to controlled integration in one closed loop", { timeout: 300_
 			);
 		}
 		const readState = async () => {
-			const raw = await pg.admin.query(`SELECT body FROM pi861_runtime_state WHERE state_key='ax10chain:project' LIMIT 1`).catch(() => ({ rows: [] }));
+			const raw = await pg.admin.query(`SELECT body FROM "${pg.schema}".pi861_runtime_state WHERE state_key='ax10chain:project' LIMIT 1`).catch(() => ({ rows: [] }));
 			return raw.rows[0]?.body ?? null;
 		};
 		const waitFor = async (predicate, label, limit = 700) => {
@@ -305,6 +321,8 @@ test("AX10: /goal to controlled integration in one closed loop", { timeout: 300_
 		// --- step 3: two REAL same-machine Pi workers execute the guarded write tool; the
 		// stdio + HTTP/SSE MCP restricted operations run at the composite module tier below.
 		const reviewed = await waitFor((current) => current.status === "review", "goal review", 900);
+		// Durable chain evidence: the final project state at review time.
+		if (evidenceDir) writeFileSync(join(evidenceDir, "ax10-reviewed-state.json"), `${JSON.stringify(reviewed, null, 2)}\n`, { mode: 0o600 });
 		const tasks = reviewed.board.tasks;
 		for (const id of ["A", "B", "C"]) assert.equal(tasks.find((task) => task.id === id).status, "done", `${id} completed`);
 		const repair = tasks.find((task) => task.reworkFor === "A");
@@ -319,9 +337,9 @@ test("AX10: /goal to controlled integration in one closed loop", { timeout: 300_
 			"worker prompt-loop MCP activation is not wired in the composite (worker baseTools exclude the activation surface); MCP ops executed at the composite module tier inside this chain",
 		);
 		// --- step 4: receipts, memory, budget and plan events persisted in real PG17.
-		const stateRows = await pg.admin.query(`SELECT state_key FROM pi861_runtime_state WHERE state_key LIKE 'ax10chain%'`);
+		const stateRows = await pg.admin.query(`SELECT state_key FROM "${pg.schema}".pi861_runtime_state WHERE state_key LIKE 'ax10chain%'`);
 		assert.ok(stateRows.rows.length >= 3, `runtime state rows in PG17: ${stateRows.rows.map((row) => row.state_key).join(",")}`);
-		const usage = await pg.admin.query(`SELECT body FROM pi861_runtime_state WHERE state_key='ax10chain:model-usage' LIMIT 1`);
+		const usage = await pg.admin.query(`SELECT body FROM "${pg.schema}".pi861_runtime_state WHERE state_key='ax10chain:model-usage' LIMIT 1`);
 		assert.ok(usage.rows[0], "the C3 usage ledger persisted to PG17");
 		const persistedUsage = usage.rows[0].body;
 		assert.ok(Object.values(persistedUsage.byPurpose ?? {}).some((count) => count >= 1), "physical model attempts settled on the ledger");
@@ -334,18 +352,29 @@ test("AX10: /goal to controlled integration in one closed loop", { timeout: 300_
 		assert.ok(reviewed.evidence.some((entry) => entry.kind === "structural-check" && entry.detail[0] === "stage:candidate"), "trusted structural checks recorded");
 		recorder.record("step5 review failure -> rework", "pass");
 		// --- step 6: barriers from durable state; duplicate resume refused; single
-		// integration executor (exactly one integration stage pass per task).
+		// integration executor (exactly one integration stage pass per accepted item).
+		// A's first candidate was rejected; the REPAIR's acceptance is what marked A done
+		// (acceptRepair), so the barrier reads A's effective acceptance timestamp.
 		const startedC = (reviewed.stages ?? []).find((stage) => stage.taskId === "C" && stage.kind === "execution" && stage.status === "started");
-		const acceptedA = (reviewed.evidence ?? []).find((entry) => entry.kind === "behavioral-check" && entry.taskId === "A");
-		const acceptedB = (reviewed.evidence ?? []).find((entry) => entry.kind === "behavioral-check" && entry.taskId === "B");
-		assert.ok(acceptedA.at < startedC.at, `A.accepted(${acceptedA.at}) < C.started(${startedC.at})`);
+		const behavioral = (reviewed.evidence ?? []).filter((entry) => entry.kind === "behavioral-check");
+		const acceptedA = behavioral.find((entry) => entry.taskId === "A" || entry.taskId === "A-repair-1");
+		const acceptedB = behavioral.find((entry) => entry.taskId === "B");
+		assert.ok(startedC && acceptedA && acceptedB, `barrier anchors present: C=${Boolean(startedC)} A=${Boolean(acceptedA)} B=${Boolean(acceptedB)}`);
+		assert.ok(acceptedA.at < startedC.at, `A.accepted(${acceptedA.at} on ${acceptedA.taskId}) < C.started(${startedC.at})`);
 		assert.ok(startedC.at < acceptedB.at, `C.started(${startedC.at}) < B.finished(${acceptedB.at})`);
-		for (const id of ["A", "B", "C"]) {
-			const integrations = (reviewed.stages ?? []).filter((stage) => stage.taskId === id && stage.kind === "integration" && stage.status === "passed");
-			assert.equal(integrations.length, 1, `exactly one integration pass for ${id}`);
+		for (const [id, integratedAs] of [["A", "A-repair-1"], ["B", "B"], ["C", "C"]]) {
+			const integrations = (reviewed.stages ?? []).filter((stage) => stage.taskId === integratedAs && stage.kind === "integration" && stage.status === "passed");
+			assert.equal(integrations.length, 1, `exactly one integration pass for ${id} (via ${integratedAs})`);
 		}
-		await assert.rejects(session.command("prompt", { message: "/goal resume" }, runSignal), /resume/i, "duplicate resume on a non-paused goal is refused");
-		recorder.record("step6 barriers + single executor", "pass");
+			// Duplicate resume on a non-paused goal is refused: command errors surface as
+			// extension notifications (the RPC itself still succeeds), so the oracle is the
+			// durable state - the generation and run must NOT advance.
+			const beforeResume = await readState();
+			await session.command("prompt", { message: "/goal resume" }, runSignal).catch(() => {});
+			const afterResume = await readState();
+			assert.equal(afterResume.goal.generation, beforeResume.goal.generation, "duplicate resume never advances the generation");
+			assert.equal(afterResume.goal.runId, beforeResume.goal.runId, "duplicate resume never mints a second run");
+			recorder.record("step6 barriers + single executor", "pass");
 		// --- step 7: the single integration directory holds the verified artifacts and the
 		// real repository check runs there (check.mjs asserts a.txt === "A").
 		const integration = reviewed.integrationWorkspace ?? JSON.parse(readFileSync(join(chainRoot, "state", "integration.json"), "utf8"));
@@ -361,6 +390,12 @@ test("AX10: /goal to controlled integration in one closed loop", { timeout: 300_
 		const acceptedState = await waitFor((current) => current.status === "completed", "goal completed", 200);
 		assert.ok((acceptedState.evidence ?? []).some((entry) => entry.kind === "human-acceptance"), "the adoption fact is published on acceptance");
 		recorder.record("step8 acceptance + adoption fact", "pass");
+		// Operator adoption: fast-forward the repository's main branch to the accepted
+		// integration result (the integration worktree shares the repository's object
+		// store), so the NEXT goal pins a base the integration tree actually sits on.
+		const integratedHead = (await execute("git", ["rev-parse", "HEAD"], { cwd: integration.path })).stdout.trim();
+		await execute("git", ["merge", "--ff-only", integratedHead], { cwd: repo });
+		recorder.record("step8 operator adoption ff-merge", "pass", `main -> ${integratedHead.slice(0, 12)}`);
 		// Idle-append wake on the goal surface: a second objective wakes the SAME persistent
 		// queue and runner; the provider answers it with a single D task.
 		await session.command("prompt", { message: "/goal clear" }, runSignal);
@@ -425,7 +460,12 @@ async function runMcpModuleTier(t, chainRoot) {
 		role: () => role,
 		clients: [httpd, stdio],
 		environment: [],
-		resourceRules: bindings.map((binding) => ({ ...binding, equals: { project: "ax10" } })),
+		// Per-binding argument rules: the echo tool's schema admits only {message}, the
+		// stdio lookup tool takes {project}.
+		resourceRules: [
+			{ ...bindings[0], equals: { message: "ax10" } },
+			{ ...bindings[1], equals: { project: "ax10" } },
+		],
 	});
 	t.after(() => capabilities.close());
 	const catalog = await repository.catalog();

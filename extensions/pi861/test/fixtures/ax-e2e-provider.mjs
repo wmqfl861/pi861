@@ -59,10 +59,10 @@ export default function fixture(pi) {
 				return output;
 			}
 			if (prompt.startsWith("Plan only the authorized project objective")) {
-				const vocabulary = JSON.parse(prompt.split("\n\n").at(-1));
-				const modelId = vocabulary.modelIds[0];
-				const roleId = vocabulary.roleIds[0];
-				const checkId = vocabulary.checkIds[0];
+				const payload = JSON.parse(prompt.split("\n\n").at(-1));
+				const modelId = payload.modelIds[0];
+				const roleId = payload.roleIds[0];
+				const checkId = payload.checkIds[0];
 				const task = (id, extra = {}) => ({
 					task: {
 						id,
@@ -76,7 +76,12 @@ export default function fixture(pi) {
 					},
 					execution: { instructions: `Write ${id.toLowerCase()}.txt with the exact content ${id}.`, roleId, modelId, checkIds: [checkId] },
 				});
-				done({ ...base, content: [{ type: "text", text: JSON.stringify({ tasks: [task("A"), task("B"), task("C")] }) }], stopReason: "stop" });
+				// The idle-append objective plans a single D task (K8 step 8: a second goal
+				// wakes the same persistent queue); every other objective plans A/slow B/C.
+				const tasks = String(payload.objective ?? "").includes("idle-append")
+					? [task("D", { dependsOn: [] })]
+					: [task("A"), task("B"), task("C")];
+				done({ ...base, content: [{ type: "text", text: JSON.stringify({ tasks }) }], stopReason: "stop" });
 				return output;
 			}
 			if (prompt.startsWith("Independent review of a completed task")) {
@@ -102,8 +107,15 @@ export default function fixture(pi) {
 				});
 				return output;
 			}
-			const task = /Task: (\w)/.exec(prompt)?.[1];
-			if (task && !messages.some((m) => m.role === "toolResult")) {
+			// Worker task prompt. Runtime workers share a --session-dir, so a worker host may
+			// resume a transcript that already contains EARLIER tasks and their tool results;
+			// the current task is the LAST "Task: X" in the transcript, and the write has
+			// happened only when a tool result follows the last user message.
+			const taskMatches = [...prompt.matchAll(/Task: (\w)/g)];
+			const task = taskMatches.at(-1)?.[1];
+			const lastUserIndex = messages.map((m) => m.role).lastIndexOf("user");
+			const resultAfterLastUser = messages.slice(lastUserIndex + 1).some((m) => m.role === "toolResult");
+			if (task && !resultAfterLastUser) {
 				const result = { ...base, content: [{ type: "toolCall", id: `ax-e2e-write-${task}`, name: "write", arguments: { path: `${task.toLowerCase()}.txt`, content: task } }], stopReason: "toolUse" };
 				if (task === "B") setTimeout(() => done(result), Number(process.env.PI861_AX_E2E_SLOW_MS ?? 600));
 				else done(result);

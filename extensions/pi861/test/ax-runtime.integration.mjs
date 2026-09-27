@@ -43,6 +43,9 @@ import { inferWithRecovery, ModelFailure, ModelRecovery } from "../src/routing.t
 import { emptyUsageLedger, ModelUsageService } from "../src/live/model-service.ts";
 import { ProbeInFlight } from "../src/contracts/budget.ts";
 import { AttemptStreamBridge, businessOperationId, StreamOperationBlocked } from "../src/live/stream-bridge.ts";
+import { StreamClaims } from "../src/live/stream-claims.ts";
+import { managedStream } from "../src/live/managed-stream.ts";
+import { ModelRuntime } from "../src/live/model-runtime.ts";
 import { OperationLedger } from "../src/contracts/operation.ts";
 import { digest } from "../src/contracts/hash.ts";
 import { McpClient } from "../src/live/mcp.ts";
@@ -710,6 +713,162 @@ test("AX4: stream interruption points; side effects never duplicated", async (t)
 				await client.close();
 				await server.close();
 			}
+		},
+	);
+	await t.test(
+		"composite tier round-3 wiring: shared ledger claim-once, unknown gate + resolve recovery, revocation zero dispatch",
+		{ skip: !state.compositeDeclared ? skipReason(scenario, state) : false },
+		async () => {
+			assert.notEqual(compositeSnapshot, "UNDECLARED");
+			// SnapshotID-3 (5cacec62e) wires C5 stream claims into the managed stream: one
+			// SHARED OperationLedger across bridges, stable business ids for activated
+			// capability tools, unknown receipts pausing model dispatch until the trusted
+			// resolve-stream channel reconciles, and revoked activations refusing to bind.
+			const identity = { serviceId: "ax4c5", toolName: "transfer", accountId: "acct", resourceId: "res-1", schemaDigest: "sha-ax4" };
+			const registry = new Map([["pi861_mcp_ax4c5", { identity }]]);
+			const claims = new StreamClaims(
+				(toolName) => {
+					const resolved = registry.get(toolName);
+					return resolved ? { identity: resolved.identity, business: true } : undefined;
+				},
+				(toolName) => ({ serviceId: "pi-host", toolName, accountId: "local", resourceId: toolName, schemaDigest: `d-${toolName}` }),
+			);
+			const attempt = (generation) => ({ generation, configId: "fixture", configRevision: "1" });
+			const message = (...content) => ({ content, model: "fixture", usage: { input: 2, output: 1 } });
+			const operationOf = (binding) => businessOperationId(binding);
+			// 1) Claim-once with a stable business id: identical arguments under different
+			// local call ids are ONE operation; a second bridge over the SHARED ledger is
+			// blocked before any dispatch.
+			const first = claims.bind({ type: "toolCall", id: "c1", name: "pi861_mcp_ax4c5", arguments: { amount: 5 } });
+			const second = claims.bind({ type: "toolCall", id: "c2", name: "pi861_mcp_ax4c5", arguments: { amount: 5 } });
+			assert.equal(operationOf(first), operationOf(second), "identical business arguments share one operation id");
+			const firstEvents = [];
+			const firstBridge = new AttemptStreamBridge((event) => firstEvents.push(event), () => true, { ledger: claims.ledger, bind: claims.bind, now: () => 1 });
+			const ownerOne = attempt(1);
+			firstBridge.begin(ownerOne, signal());
+			firstBridge.push(ownerOne, { type: "done", reason: "toolUse", message: message({ type: "toolCall", id: "c1", name: "pi861_mcp_ax4c5", arguments: { amount: 5 } }) });
+			assert.equal(firstBridge.commit(ownerOne), true);
+			assert.equal(claims.ledger.get(operationOf(first)).status, "dispatched");
+			const secondEvents = [];
+			const secondBridge = new AttemptStreamBridge((event) => secondEvents.push(event), () => true, { ledger: claims.ledger, bind: claims.bind, now: () => 2 });
+			const ownerTwo = attempt(2);
+			secondBridge.begin(ownerTwo, signal());
+			secondBridge.push(ownerTwo, { type: "done", reason: "toolUse", message: message({ type: "toolCall", id: "c2", name: "pi861_mcp_ax4c5", arguments: { amount: 5 } }) });
+			assert.throws(() => secondBridge.commit(ownerTwo), (error) => error instanceof StreamOperationBlocked, "the shared ledger never re-claims a live business operation");
+			assert.equal(secondEvents.filter((event) => event.type.startsWith("toolcall")).length, 0);
+			// Native host tools stay per-call local intents (no false collisions).
+			const writeA = claims.bind({ type: "toolCall", id: "w-1", name: "write", arguments: { path: "x" } });
+			const writeB = claims.bind({ type: "toolCall", id: "w-2", name: "write", arguments: { path: "x" } });
+			assert.notEqual(operationOf(writeA), operationOf(writeB));
+			// Settlement from the real receipt frees the gate.
+			assert.equal(claims.settle("c1", { ok: true }, false, 3), operationOf(first));
+			assert.equal(claims.unsettled(), 0);
+			assert.equal(claims.ledger.get(operationOf(first)).status, "succeeded");
+			recorder.record("round-3 shared ledger claim-once (composite)", "pass");
+			// 2) Unknown blocks the next MODEL dispatch through the managed stream until the
+			// trusted reconcile (resolve-stream semantics) re-arms it.
+			const policy = {
+				targets: [
+					{
+						id: "m1",
+						revision: "r1",
+						provider: "fixture",
+						model: "m1",
+						quality: 2,
+						costRank: 1,
+						contextWindow: 200_000,
+						capabilities: ["text"],
+						enabled: true,
+					},
+				],
+				preferred: "m1",
+				requirements: { minQuality: 1, contextTokens: 100_000, capabilities: ["text"], allowedIds: ["m1"] },
+				recovery: { failoverEnabled: true, failbackEnabled: false, probeIntervalMs: 1000, maxProbeIntervalMs: 5000, requiredProbeSuccesses: 2 },
+				maxAttempts: 2,
+				requestTimeoutMs: 10_000,
+				maxRequests: 50,
+				maxProbeRequests: 1,
+			};
+			const fixtureMessage = (extra = {}) => ({
+				role: "assistant",
+				content: [{ type: "text", text: "ax4 managed response" }],
+				api: "openai-completions",
+				provider: "fixture",
+				model: "m1",
+				usage: { input: 3, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 4, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+				stopReason: "stop",
+				...extra,
+			});
+			const gatedIdentity = { serviceId: "ax4gate", toolName: "t", accountId: "a", resourceId: "r", schemaDigest: "h" };
+			const gateRegistry = new Map([["pi861_mcp_ax4gate", { identity: gatedIdentity }]]);
+			const gateClaims = new StreamClaims(
+				(toolName) => {
+					const resolved = gateRegistry.get(toolName);
+					return resolved ? { identity: resolved.identity, business: true } : undefined;
+				},
+				(toolName) => ({ serviceId: "pi-host", toolName, accountId: "local", resourceId: toolName, schemaDigest: "d" }),
+			);
+			let dispatchCount = 0;
+			const runtime = new ModelRuntime(
+				policy,
+				async (_target, request, runSignal, _onProgress, _onUsage, modelAttempt) => {
+					const live = request.stream;
+					const toolMessage = fixtureMessage({
+						content: [{ type: "toolCall", id: "gate-1", name: "pi861_mcp_ax4gate", arguments: { n: 1 } }],
+						stopReason: "toolUse",
+					});
+					live.attempt = modelAttempt;
+					live.bridge.begin(modelAttempt, runSignal);
+					live.bridge.push(modelAttempt, { type: "start", partial: toolMessage });
+					live.bridge.push(modelAttempt, { type: "done", reason: "toolUse", message: toolMessage });
+					dispatchCount++;
+					return toolMessage;
+				},
+				async () => true,
+			);
+			const collectorFor = () => {
+				const events = [];
+				return { events, output: { push: (event) => events.push(structuredClone(event)) } };
+			};
+			const failureMessage = (error, reason) => ({ content: [], stopReason: reason, errorMessage: error instanceof Error ? error.message : "failed" });
+			const c5 = { prepare: async () => gateClaims.unsettled(), wiring: { ledger: gateClaims.ledger, bind: gateClaims.bind } };
+			const firstRun = collectorFor();
+			managedStream(() => runtime, () => firstRun.output, failureMessage, c5)({ id: "ax4-managed" }, { messages: [] }, {});
+			await new Promise((resolve) => setTimeout(resolve, 80));
+			assert.equal(dispatchCount, 1);
+			assert.ok(firstRun.events.some((event) => event.type === "toolcall_end"), "the committed tool claimed and dispatched once");
+			const blockedOperation = gateClaims.ledger.exportState().operations.find((op) => op.status === "dispatched")?.operationId;
+			assert.ok(blockedOperation, "the dispatched claim exists");
+			gateClaims.markLostReceipts();
+			assert.equal(gateClaims.unsettled(), 1);
+			assert.equal(gateClaims.pending().length, 1, "the operator surface lists the unknown operation");
+			const gated = collectorFor();
+			managedStream(() => runtime, () => gated.output, failureMessage, c5)({ id: "ax4-managed" }, { messages: [] }, {});
+			await new Promise((resolve) => setTimeout(resolve, 80));
+			assert.equal(dispatchCount, 1, "no second model dispatch while an operation is unknown");
+			assert.equal(gated.events.at(-1).type, "error");
+			assert.match(gated.events.at(-1).error.errorMessage, /reconcile pending operations first/, "the gate names the resolve-stream channel");
+			gateClaims.reconcile(blockedOperation, { status: "not-executed" });
+			assert.equal(gateClaims.unsettled(), 0);
+			const resumed = collectorFor();
+			managedStream(() => runtime, () => resumed.output, failureMessage, c5)({ id: "ax4-managed" }, { messages: [] }, {});
+			await new Promise((resolve) => setTimeout(resolve, 80));
+			assert.equal(dispatchCount, 2, "trusted reconciliation re-arms model dispatch");
+			gateClaims.markLostReceipts();
+			gateClaims.settle("gate-1", { done: true }, false);
+			recorder.record("round-3 unknown gate + resolve recovery (composite)", "pass", `dispatches=${dispatchCount}`);
+			// 3) Revocation zero dispatch: an activation removed from the binding plan makes
+			// the SAME tool name unresolvable; binding refuses and the commit aborts with
+			// zero dispatch (no fallback to a native identity for capability tools).
+			gateRegistry.delete("pi861_mcp_ax4gate");
+			const revokedEvents = [];
+			const revokedBridge = new AttemptStreamBridge((event) => revokedEvents.push(event), () => true, { ledger: gateClaims.ledger, bind: gateClaims.bind, now: () => 5 });
+			const ownerRevoked = attempt(9);
+			revokedBridge.begin(ownerRevoked, signal());
+			revokedBridge.push(ownerRevoked, { type: "done", reason: "toolUse", message: message({ type: "toolCall", id: "gate-2", name: "pi861_mcp_ax4gate", arguments: { n: 2 } }) });
+			assert.throws(() => revokedBridge.commit(ownerRevoked), /no active capability binding/, "a revoked activation refuses to bind");
+			assert.equal(revokedEvents.filter((event) => event.type.startsWith("toolcall")).length, 0, "zero dispatch after revocation");
+			recorder.record("round-3 revocation zero dispatch (composite)", "pass");
 		},
 	);
 });
