@@ -21,9 +21,10 @@ import {
 	type MemoryReceipt,
 	type MemoryWrite,
 } from "../memory.ts";
-import { PostgresMemory, type SqlConnection, type SqlPool } from "../postgres.ts";
-import type { EnrichmentJobView, MemoryExtractor } from "./extraction.ts";
+import { type EnrichmentJobView, type MemoryExtractor } from "./extraction.ts";
 import { type MemoryMigrationResult, type MemoryMigrationSource, migrateMemory } from "./memory-migration.ts";
+import type { MemoryRecord, MemoryRecordWrite } from "../memory-records.ts";
+import { PostgresMemory, type SqlConnection, type SqlPool } from "../postgres.ts";
 
 /**
  * P2-D trusted storage service. Workers hold no database credentials: they present a
@@ -163,11 +164,19 @@ export class StorageSession {
 	async put(input: MemoryWrite): Promise<MemoryReceipt> {
 		return this.memoryBackend.put(input);
 	}
+	/** Record-level put: full provenance chains and derivedFrom survive the write. */
+	async putRecord(input: MemoryRecordWrite): Promise<MemoryReceipt> {
+		return this.memoryBackend.putRecord(input);
+	}
 	async withdraw(requestId: string, scope: string, id: string, expectedRevision: number): Promise<MemoryReceipt> {
 		return this.memoryBackend.withdraw(requestId, scope, id, expectedRevision);
 	}
 	async get(scope: string, id: string): Promise<MemoryItem | undefined> {
 		return this.memoryBackend.get(scope, id);
+	}
+	/** Raw record view (P2-M consumer surface): full provenance chain and derivedFrom. */
+	async getRecord(scope: string, id: string): Promise<MemoryRecord | undefined> {
+		return this.memoryBackend.getRecord(scope, id);
 	}
 	async search(query: string, limit?: number): Promise<MemoryItem[]> {
 		return this.memoryBackend.search(query, limit ?? 8);
@@ -531,6 +540,7 @@ export interface StorageServiceResponse {
 
 const STORAGE_OPERATION_NAMES = [
 	"put",
+	"putRecord",
 	"withdraw",
 	"get",
 	"search",
@@ -597,6 +607,15 @@ const STORAGE_OPERATIONS: Record<StorageOperationName, OperationHandler> = {
 					? null
 					: operationNumber(args.expectedRevision, "expectedRevision"),
 			item: args.item as MemoryInput,
+		}),
+	putRecord: (session, args) =>
+		session.putRecord({
+			requestId: operationString(args.requestId, "requestId"),
+			expectedRevision:
+				args.expectedRevision === null || args.expectedRevision === undefined
+					? null
+					: operationNumber(args.expectedRevision, "expectedRevision"),
+			record: args.record as MemoryRecord,
 		}),
 	withdraw: (session, args) =>
 		session.withdraw(
