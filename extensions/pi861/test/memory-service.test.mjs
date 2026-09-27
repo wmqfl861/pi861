@@ -45,14 +45,17 @@ function setup(t, options = {}) {
 }
 
 /** Authority proxy whose put fails while the link is down; every other method passes through. */
-function gatedAuthority(memory) {
+function gatedAuthority(memory, options = {}) {
 	let down = false;
 	return {
 		memory,
 		setDown(value) {
 			down = value;
 		},
-		get: (s, id) => memory.get(s, id),
+		get: (s, id) => {
+			if (down && options.gateGet) return Promise.reject(new Error("simulated connection failure"));
+			return memory.get(s, id);
+		},
 		put: (input) => {
 			if (down) return Promise.reject(new Error("simulated connection failure"));
 			return memory.put(input);
@@ -146,6 +149,175 @@ test("oversized tool results become durable controlled references and are never 
 	let offset = 0;
 	for (;;) {
 		const page = await governance.readResultReference(body.resultRef, offset);
+		text += page.text;
+		offset = page.nextOffset;
+		if (page.complete) break;
+	}
+	assert.equal(JSON.parse(text).result, payload);
+});
+
+test("durable references survive distillation, and reference records never reach the model (review-1 F1)", async (t) => {
+	const { governance, memory } = setup(t, { resultPageSize: 128_000 });
+	const payload = JSON.stringify({ tool: "web.read", result: "n".repeat(80_000), isError: false });
+	const outcome = await governance.captureToolExecutionEnd({
+		sessionId: "s1",
+		toolCallId: "call-distill",
+		toolName: "web.read",
+		result: payload,
+	});
+	assert.equal(outcome.status, "referenced");
+	const resultRef = JSON.parse((await governance.authority.get(scope, outcome.id)).full).resultRef;
+	// Governance distill completes the chunk/manifest jobs without a model call.
+	const modeled = [];
+	await governance.captureUserStatement({ sessionId: "s1", sequence: 1, text: "普通记录：需要提炼", kind: "project" });
+	const stats = await governance.distill(
+		(_context, record) => {
+			modeled.push(record.id);
+			return Promise.resolve({ abstract: "摘要", overview: "普通记录的概览。", facts: [] });
+		},
+		{},
+		"fixture-model",
+		{ signal: new AbortController().signal },
+	);
+	assert.ok(stats.completed >= 2, JSON.stringify(stats));
+	// The capture descriptor record is ordinary evidence and may be distilled;
+	// the reference storage records (chunk + manifest) must never reach the model.
+	const owner = `pi861:${scope}`;
+	const referenceIds = new Set([
+		digest(["pi861.result.chunk", owner, resultRef, 0]),
+		digest(["pi861.result.manifest", owner, resultRef]),
+	]);
+	assert.ok(modeled.includes(digest(["pi861.user", "s1", 1])), "the user record reached the model");
+	assert.deepEqual(modeled.filter((id) => referenceIds.has(id)), [], "reference storage records never reached the model");
+	// A second reference stored after the governance pass still has queued jobs;
+	// a raw authority enrich (bypassing the governance wrapper) projects its
+	// chunk/manifest records, and the reference must keep working regardless.
+	const secondPayload = JSON.stringify({ tool: "web.read", result: "m".repeat(80_000), isError: false });
+	const second = await governance.captureToolExecutionEnd({
+		sessionId: "s1",
+		toolCallId: "call-distill-raw",
+		toolName: "web.read",
+		result: secondPayload,
+	});
+	assert.equal(second.status, "referenced");
+	const raw = await memory.enrich(
+		{
+			modelId: "fixture",
+			async extract() {
+				return { abstract: "模型摘要", overview: "投影覆盖了原字段。", facts: [] };
+			},
+		},
+		{ signal: new AbortController().signal },
+	);
+	assert.ok(raw.completed >= 2, `raw pass distilled reference records: ${JSON.stringify(raw)}`);
+	const rawRef = JSON.parse((await governance.authority.get(scope, second.id)).full).resultRef;
+	let text = "";
+	for (let offset = 0; ; ) {
+		const page = await governance.readResultReference(rawRef, offset);
+		text += page.text;
+		offset = page.nextOffset;
+		if (page.complete) break;
+	}
+	assert.equal(JSON.parse(text).result, secondPayload);
+	assert.equal(await governance.revokeResultReference("revoke-post-distill", rawRef), 2);
+	assert.equal(await governance.readResultReference(rawRef).then(
+		() => "readable",
+		(error) => error.message,
+	), "Result not found");
+});
+
+test("oversized captures park through the pending queue during an authority outage (review-1 F2)", async (t) => {
+	const dir = mkdtempSync(join(tmpdir(), "pi861-governance-outage-big-"));
+	t.after(() => rmSync(dir, { recursive: true, force: true }));
+	const memory = new LayeredMemory(
+		new FileStateStore(join(dir, "memory.json"), emptyLayeredMemory("t")),
+		principal,
+	);
+	const gate = gatedAuthority(memory);
+	const pendingStore = new FileStateStore(join(dir, "pending.json"), { version: 1, entries: [] });
+	const governance = attachMemoryGovernance({}, { authority: gate, pending: pendingStore, scope, resultPageSize: 128_000 });
+	gate.setDown(true);
+	const payload = JSON.stringify({ tool: "web.read", result: "b".repeat(80_000), isError: false });
+	const outcome = await governance.captureToolExecutionEnd({
+		sessionId: "s1",
+		toolCallId: "call-outage",
+		toolName: "web.read",
+		result: payload,
+	});
+	// Same pause boundary as every other capture: checkpoint-uncommitted, parked
+	// locally, no raw connection error, nothing readable from a local authority.
+	assert.equal(outcome.status, "failed");
+	assert.match(outcome.error, /checkpoint uncommitted/);
+	const parked = JSON.parse(readFileSync(join(dir, "pending.json"), "utf8"));
+	assert.ok(parked.entries.length >= 1, "the chunk write parked as uncommitted");
+	assert.ok(parked.entries.every((entry) => entry.state === "uncommitted"));
+	assert.equal((await memory.search("bbbbbbbbbbbb")).length, 0);
+	// Recovery: flush replays the parked chunk; retrying the capture completes
+	// the manifest and descriptor idempotently, then the payload reads back.
+	gate.setDown(false);
+	const flushed = await governance.flushPending();
+	assert.equal(flushed.committed, parked.entries.length);
+	const retried = await governance.captureToolExecutionEnd({
+		sessionId: "s1",
+		toolCallId: "call-outage",
+		toolName: "web.read",
+		result: payload,
+	});
+	assert.equal(retried.status, "referenced");
+	const resultRef = JSON.parse((await memory.get(scope, retried.id)).full).resultRef;
+	let text = "";
+	for (let offset = 0; ; ) {
+		const page = await governance.readResultReference(resultRef, offset);
+		text += page.text;
+		offset = page.nextOffset;
+		if (page.complete) break;
+	}
+	assert.equal(JSON.parse(text).result, payload);
+});
+
+test("oversized captures park under a full outage where reads fail too (review-1 F2-R1)", async (t) => {
+	const dir = mkdtempSync(join(tmpdir(), "pi861-governance-outage-full-"));
+	t.after(() => rmSync(dir, { recursive: true, force: true }));
+	const memory = new LayeredMemory(
+		new FileStateStore(join(dir, "memory.json"), emptyLayeredMemory("t")),
+		principal,
+	);
+	const gate = gatedAuthority(memory, { gateGet: true });
+	const pendingStore = new FileStateStore(join(dir, "pending.json"), { version: 1, entries: [] });
+	const governance = attachMemoryGovernance({}, { authority: gate, pending: pendingStore, scope, resultPageSize: 128_000 });
+	gate.setDown(true);
+	const payload = JSON.stringify({ tool: "web.read", result: "n".repeat(80_000), isError: false });
+	const outcome = await governance.captureToolExecutionEnd({
+		sessionId: "s1",
+		toolCallId: "call-outage-full",
+		toolName: "web.read",
+		result: payload,
+	});
+	// The store's existence probes are advisory: a failing get degrades to
+	// "write it" and the pending-queue put adjudicates, so the capture parks
+	// with the checkpoint signal instead of leaking the raw connection error.
+	assert.equal(outcome.status, "failed");
+	assert.match(outcome.error, /checkpoint uncommitted/);
+	assert.ok(!outcome.error.includes("simulated connection failure"), `raw error leaked: ${outcome.error}`);
+	const parked = JSON.parse(readFileSync(join(dir, "pending.json"), "utf8"));
+	assert.ok(parked.entries.length >= 1, "the chunk write parked as uncommitted");
+	assert.ok(parked.entries.every((entry) => entry.state === "uncommitted"));
+	// Recovery: flush replays the parked chunk, the idempotent retry completes
+	// manifest and descriptor, and the payload reads back in full.
+	gate.setDown(false);
+	const flushed = await governance.flushPending();
+	assert.equal(flushed.committed, parked.entries.length);
+	const retried = await governance.captureToolExecutionEnd({
+		sessionId: "s1",
+		toolCallId: "call-outage-full",
+		toolName: "web.read",
+		result: payload,
+	});
+	assert.equal(retried.status, "referenced");
+	const resultRef = JSON.parse((await memory.get(scope, retried.id)).full).resultRef;
+	let text = "";
+	for (let offset = 0; ; ) {
+		const page = await governance.readResultReference(resultRef, offset);
 		text += page.text;
 		offset = page.nextOffset;
 		if (page.complete) break;

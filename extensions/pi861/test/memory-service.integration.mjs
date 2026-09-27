@@ -183,8 +183,46 @@ test("governance over real PostgreSQL: assembly, references, withdrawal, receipt
 			if (page.complete) break;
 		}
 		assert.equal(JSON.parse(text).result, payload);
-		// Revocation on node A withdraws the chunks; node B fails uniformly at once.
-		assert.equal(await nodeA.revokeResultReference("revoke-big", resultRef), 1);
+		// Revocation on node A withdraws the manifest and chunks; node B fails uniformly at once.
+		assert.equal(await nodeA.revokeResultReference("revoke-big", resultRef), 2);
+		await assert.rejects(nodeB.readResultReference(resultRef), /Result not found/);
+	});
+
+	await t.test("durable references survive a raw authority distillation pass (review-1 F1)", async () => {
+		const payload = "v".repeat(80_000);
+		const outcome = await nodeA.captureToolExecutionEnd({
+			sessionId: "s-raw",
+			toolCallId: "call-raw",
+			toolName: "web.read",
+			result: payload,
+		});
+		assert.equal(outcome.status, "referenced");
+		const resultRef = JSON.parse((await sessionA.get(scope, outcome.id)).full).resultRef;
+		// Raw PostgresMemory.enrich bypasses the governance wrapper and really
+		// projects the chunk/manifest records of the reference. maxJobs covers the
+		// jobs still queued from earlier subtests so the new reference's records
+		// are guaranteed to be projected in this pass.
+		const raw = await sessionA.memory.enrich(
+			{
+				modelId: "fixture",
+				async extract() {
+					return { abstract: "模型摘要", overview: "投影覆盖了原字段。", facts: [] };
+				},
+			},
+			{ signal: new AbortController().signal, timeoutMs: 15_000, maxJobs: 10 },
+		);
+		assert.ok(raw.completed >= 2, `reference records were projected: ${JSON.stringify(raw)}`);
+		// Reads and revocation keep working: the descriptor lives in the manifest
+		// record's full body, which projections never replace.
+		let text = "";
+		for (let offset = 0; ; ) {
+			const page = await nodeB.readResultReference(resultRef, offset);
+			text += page.text;
+			offset = page.nextOffset;
+			if (page.complete) break;
+		}
+		assert.equal(JSON.parse(text).result, payload);
+		assert.equal(await nodeA.revokeResultReference("revoke-raw", resultRef), 2);
 		await assert.rejects(nodeB.readResultReference(resultRef), /Result not found/);
 	});
 
@@ -265,8 +303,11 @@ test("governance over real PostgreSQL: assembly, references, withdrawal, receipt
 
 	await t.test("authority outage parks writes locally and flush replays to the real database", async () => {
 		let down = false;
+		// Full-outage shape: reads fail too, not just writes. The oversized
+		// capture must still park with the checkpoint signal - the store's
+		// existence probes are advisory and the pending-queue put adjudicates.
 		const gated = {
-			get: (s, id) => sessionA.get(s, id),
+			get: (s, id) => (down ? Promise.reject(new Error("connection lost")) : sessionA.get(s, id)),
 			put: (input) => (down ? Promise.reject(new Error("connection lost")) : sessionA.put(input)),
 			withdraw: (requestId, s, id, revision) => sessionA.withdraw(requestId, s, id, revision),
 			assemble: (options) => sessionA.memory.assemble(options),
@@ -276,7 +317,15 @@ test("governance over real PostgreSQL: assembly, references, withdrawal, receipt
 			enrich: (extractor, options) => sessionA.memory.enrich(extractor, options),
 		};
 		const pending = new FileStateStore(join(pendingDir, "outage-pending.json"), { version: 1, entries: [] });
-		const governance = attachMemoryGovernance({}, { authority: gated, pending, scope });
+		// Same entitled-reader owner as nodeA/nodeB: the reference this writer
+		// mints must resolve through nodeB after recovery.
+		const governance = attachMemoryGovernance({}, {
+			authority: gated,
+			pending,
+			scope,
+			owner: "agent:shared",
+			resultPageSize: 128_000,
+		});
 		down = true;
 		const failed = await governance.captureUserStatement({
 			sessionId: "s-outage",
@@ -286,12 +335,43 @@ test("governance over real PostgreSQL: assembly, references, withdrawal, receipt
 		});
 		assert.equal(failed.status, "failed");
 		assert.equal(await sessionA.get(scope, digest(["pi861.user", "s-outage", 1])), undefined);
+		// Oversized captures share the same pause boundary: the chunk write parks
+		// as checkpoint-uncommitted instead of surfacing the raw connection error.
+		const bigPayload = "o".repeat(80_000);
+		const bigFailed = await governance.captureToolExecutionEnd({
+			sessionId: "s-outage",
+			toolCallId: "call-outage-big",
+			toolName: "web.read",
+			result: bigPayload,
+		});
+		assert.equal(bigFailed.status, "failed");
+		assert.match(bigFailed.error, /checkpoint uncommitted/);
+		assert.ok(!bigFailed.error.includes("connection lost"), `raw error leaked: ${bigFailed.error}`);
 		const parked = JSON.parse(await readFile(join(pendingDir, "outage-pending.json"), "utf8"));
-		assert.equal(parked.entries.length, 1);
-		assert.equal(parked.entries[0].state, "uncommitted");
+		assert.ok(parked.entries.length >= 2, "both the statement and the chunk parked uncommitted");
+		assert.ok(parked.entries.every((entry) => entry.state === "uncommitted"));
 		down = false;
-		assert.deepEqual(await governance.flushPending(), { committed: 1, pending: 0 });
+		const flushed = await governance.flushPending();
+		assert.equal(flushed.pending, 0);
 		const stored = await sessionB.get(scope, digest(["pi861.user", "s-outage", 1]));
 		assert.equal(stored.full, "断库期间的用户约束");
+		// Retrying the oversized capture after recovery completes the manifest and
+		// descriptor idempotently; the payload reads back through node B.
+		const retried = await governance.captureToolExecutionEnd({
+			sessionId: "s-outage",
+			toolCallId: "call-outage-big",
+			toolName: "web.read",
+			result: bigPayload,
+		});
+		assert.equal(retried.status, "referenced");
+		const resultRef = JSON.parse((await sessionA.get(scope, retried.id)).full).resultRef;
+		let text = "";
+		for (let offset = 0; ; ) {
+			const page = await nodeB.readResultReference(resultRef, offset);
+			text += page.text;
+			offset = page.nextOffset;
+			if (page.complete) break;
+		}
+		assert.equal(JSON.parse(text).result, bigPayload);
 	});
 });

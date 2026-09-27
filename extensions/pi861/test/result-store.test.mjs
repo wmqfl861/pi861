@@ -140,17 +140,17 @@ test("oversized payloads chunk into bounded records and re-store is idempotent",
 	});
 	assert.equal(again.resultRef, reference.resultRef);
 	const delta = await memory.delta();
-	// Exactly the two chunk puts; the idempotent re-store appended no new change.
-	assert.equal(delta.changes.length, 2);
+	// Exactly the two chunk puts plus the manifest; the idempotent re-store appended none.
+	assert.equal(delta.changes.length, 3);
 	assert.deepEqual(
 		delta.changes.map((change) => change.withdrawn),
-		[false, false],
+		[false, false, false],
 	);
 });
 
 test("revocation withdraws every chunk and reads fail uniformly afterwards", async (t) => {
 	const { durable, memory } = durableSetup(t);
-	const payload = `${"y".repeat(250_000)}tail`; // two chunks
+	const payload = `${"y".repeat(250_000)}tail`; // two chunks plus a manifest record
 	const reference = await durable.store(payload, "role:worker-a", {
 		kind: "tool",
 		scope: "project:p",
@@ -158,7 +158,7 @@ test("revocation withdraws every chunk and reads fail uniformly afterwards", asy
 		sourceComplete: true,
 	});
 	const withdrawn = await durable.revoke("revoke-1", reference.resultRef, "role:worker-a");
-	assert.equal(withdrawn, 2);
+	assert.equal(withdrawn, 3);
 	assert.equal(await durable.read(reference.resultRef, "role:worker-a").then(
 		() => "readable",
 		(error) => error.message,
@@ -199,4 +199,95 @@ test("durable store validates limits and descriptors", async (t) => {
 		/Invalid result descriptor/,
 	);
 	await assert.rejects(durable.store("payload", "", { kind: "tool", scope: "project:p", sourceComplete: true }), /owner identity/);
+});
+
+test("durable references survive a raw authority distillation pass (review-1 F1 regression)", async (t) => {
+	const { durable, memory } = durableSetup(t);
+	const payload = `${"r".repeat(250_000)}end`; // two chunks + manifest
+	const reference = await durable.store(payload, "role:worker-a", {
+		kind: "tool",
+		scope: "project:p",
+		tool: "web.read",
+		sourceComplete: true,
+	});
+	// A raw authority enrich (bypassing any governance wrapper) projects the
+	// reference storage records: abstract/overview are replaced by model output.
+	const stats = await memory.enrich(
+		{
+			modelId: "fixture",
+			async extract() {
+				return { abstract: "模型摘要", overview: "投影生成的概览文本覆盖了原字段。", facts: [] };
+			},
+		},
+		{ signal: new AbortController().signal },
+	);
+	assert.ok(stats.completed >= 3, `reference records were distilled: ${JSON.stringify(stats)}`);
+	// The projections really landed on the reference storage records.
+	const jobs = await memory.listJobs();
+	assert.ok(jobs.filter((job) => job.state === "done").length >= 3);
+	for (const done of jobs.filter((job) => job.state === "done")) {
+		const item = await memory.get("project:p", done.memoryId);
+		assert.ok(item.overview.includes("投影生成的概览文本"), `projection present on ${done.memoryId.slice(0, 12)}`);
+	}
+	// The descriptor lives in the manifest record's full body, which projections
+	// never touch: read, metadata and revoke keep working. (The reader uses a
+	// wide page size so the full-payload loop is two pages, not 25,000.)
+	const fastReader = new PersistentResultStore(memory, { scopes: ["project:p"], pageSize: 128_000 });
+	let text = "";
+	for (let offset = 0; ; ) {
+		const page = await fastReader.read(reference.resultRef, "role:worker-a", offset);
+		text += page.text;
+		offset = page.nextOffset;
+		if (page.complete) break;
+	}
+	assert.equal(text, payload);
+	const metadata = await durable.metadata(reference.resultRef, "role:worker-a");
+	assert.equal(metadata.tool, "web.read");
+	assert.equal(await durable.revoke("revoke-after-distill", reference.resultRef, "role:worker-a"), 3);
+	assert.equal(await durable.read(reference.resultRef, "role:worker-a").then(
+		() => "readable",
+		(error) => error.message,
+	), "Result not found");
+});
+
+test("store tolerates an unreadable authority: probes degrade to writes and puts adjudicate (review-1 F2-R1)", async (t) => {
+	const { memory } = durableSetup(t);
+	// Backend whose reads all fail (full outage read side) while writes pass.
+	// The governance wiring layers the pending queue on top of put, so at unit
+	// level the contract is: store() must not leak the get error; the writes
+	// proceed and the idempotent puts (deterministic requestId + content) win.
+	const blinded = new PersistentResultStore(
+		{
+			get: () => Promise.reject(new Error("connection lost")),
+			put: (input) => memory.put(input),
+			withdraw: (requestId, scope, id, revision) => memory.withdraw(requestId, scope, id, revision),
+		},
+		{ scopes: ["project:p"], pageSize: 128_000 },
+	);
+	const payload = "f".repeat(80_000);
+	const reference = await blinded.store(payload, "role:worker-a", {
+		kind: "tool",
+		scope: "project:p",
+		tool: "web.read",
+		sourceComplete: true,
+	});
+	// A healthy reader resolves what the blinded writer committed.
+	const healthy = new PersistentResultStore(memory, { scopes: ["project:p"], pageSize: 128_000 });
+	let text = "";
+	for (let offset = 0; ; ) {
+		const page = await healthy.read(reference.resultRef, "role:worker-a", offset);
+		text += page.text;
+		offset = page.nextOffset;
+		if (page.complete) break;
+	}
+	assert.equal(text, payload);
+	// Idempotent re-store through the same blinded backend replays the same
+	// reference without leaking the get error either.
+	const again = await blinded.store(payload, "role:worker-a", {
+		kind: "tool",
+		scope: "project:p",
+		tool: "web.read",
+		sourceComplete: true,
+	});
+	assert.equal(again.resultRef, reference.resultRef);
 });
