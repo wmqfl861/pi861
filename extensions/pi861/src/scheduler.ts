@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-export type TaskStatus = "queued" | "running" | "review" | "done" | "blocked";
+export type TaskStatus = "queued" | "running" | "waiting" | "review" | "done" | "blocked" | "cancelled";
 export interface TaskSpec {
 	id: string;
 	title: string;
@@ -10,6 +10,12 @@ export interface TaskSpec {
 	acceptance: string[];
 	priority?: number;
 	retrySafe?: boolean;
+	/** Development can proceed before delivery dependencies are accepted; integration cannot. */
+	deliveryDependsOn?: string[];
+	/** Exclusive operator-defined ports, database schemas or test environment reservations. */
+	resources?: string[];
+	parentTaskId?: string;
+	reworkFor?: string;
 }
 export interface Lease {
 	taskId: string;
@@ -98,12 +104,19 @@ export class TaskBoard {
 				task.acceptance.some((item) => !item.trim()) ||
 				!Number.isSafeInteger(task.attempts) ||
 				task.attempts < 0 ||
-				!["queued", "running", "review", "done", "blocked"].includes(task.status)
+				!["queued", "running", "waiting", "review", "done", "blocked", "cancelled"].includes(task.status)
 			) {
 				throw new Error("Invalid or duplicate task");
 			}
 			if (task.writeScopes.some((scope) => normalizeScope(scope) !== scope))
 				throw new Error("Noncanonical write scope");
+			if (task.resources?.some((resource) => !resource.trim() || resource.length > 200))
+				throw new Error("Invalid resource reservation");
+			if (
+				task.parentTaskId &&
+				(!tasks.some((parent) => parent.id === task.parentTaskId) || task.parentTaskId === task.id)
+			)
+				throw new Error("Invalid parent task");
 			if (busy(task) && (!task.lease || !Number.isFinite(task.leaseUntil)))
 				throw new Error("Missing execution lease");
 			byId.set(task.id, task);
@@ -116,11 +129,11 @@ export class TaskBoard {
 			const task = byId.get(id);
 			if (!task) throw new Error(`Unknown dependency: ${id}`);
 			visiting.add(id);
-			task.dependsOn.forEach(visit);
+			[...task.dependsOn, ...(task.deliveryDependsOn ?? [])].forEach(visit);
 			visiting.delete(id);
 			visited.add(id);
 		};
-		for (const task of tasks) visit(task.id);
+		tasks.forEach((task) => visit(task.id));
 	}
 	private commit(tasks: TaskRecord[]): void {
 		this.validate(tasks);
@@ -176,7 +189,11 @@ export class TaskBoard {
 					(allowedTaskIds === undefined || allowedTaskIds.includes(task.id)) &&
 					task.dependsOn.every((id) => done.has(id)) &&
 					task.capabilities.every((capability) => capabilities.includes(capability)) &&
-					!running.some((active) => scopesConflict(active.writeScopes, task.writeScopes)),
+					!running.some(
+						(active) =>
+							scopesConflict(active.writeScopes, task.writeScopes) ||
+							(task.resources ?? []).some((resource) => active.resources?.includes(resource)),
+					),
 			)
 			.sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0) || a.id.localeCompare(b.id));
 		const task = ready[0];
@@ -209,6 +226,12 @@ export class TaskBoard {
 		const tasks = structuredClone(this.snapshot.tasks);
 		const task = this.owned(tasks, lease, now);
 		if (task.status !== "review") throw new Error("Task has not been submitted");
+		if (
+			!(task.deliveryDependsOn ?? []).every((id) =>
+				tasks.some((dependency) => dependency.id === id && dependency.status === "done"),
+			)
+		)
+			throw new Error("Delivery dependencies not accepted");
 		task.status = "done";
 		task.evidence = [...evidence];
 		delete task.lease;
@@ -239,6 +262,109 @@ export class TaskBoard {
 		}
 		if (recovered) this.commit(tasks);
 		return recovered;
+	}
+	/** Replace only queued contracts; graph validation and publication are atomic. */
+	revise(specs: TaskSpec[]): void {
+		const tasks = structuredClone(this.snapshot.tasks);
+		for (const spec of specs) {
+			const task = tasks.find((candidate) => candidate.id === spec.id);
+			if (!task || task.status !== "queued") throw new Error("Only queued tasks may be revised");
+			Object.assign(task, structuredClone(spec), { writeScopes: spec.writeScopes.map(normalizeScope) });
+		}
+		this.commit(tasks);
+	}
+	/** Waiting parents release their execution slot; all children still use this same board. */
+	waitForChildren(lease: Lease, children: TaskSpec[], now: number): void {
+		if (!children.length || children.some((child) => child.parentTaskId !== lease.taskId))
+			throw new Error("Children must name the waiting parent");
+		const tasks = structuredClone(this.snapshot.tasks);
+		const parent = this.owned(tasks, lease, now);
+		parent.status = "waiting";
+		parent.dependsOn = [...new Set([...parent.dependsOn, ...children.map((child) => child.id)])];
+		delete parent.lease;
+		delete parent.leaseUntil;
+		this.commit([
+			...tasks,
+			...children.map(
+				(child): TaskRecord => ({
+					...structuredClone(child),
+					status: "queued",
+					attempts: 0,
+					artifacts: [],
+					evidence: [],
+				}),
+			),
+		]);
+	}
+	wakeParents(): void {
+		const tasks = structuredClone(this.snapshot.tasks);
+		let changed = false;
+		for (const task of tasks) {
+			if (
+				task.status === "waiting" &&
+				task.dependsOn.every((id) => tasks.some((child) => child.id === id && child.status === "done"))
+			) {
+				task.status = "queued";
+				changed = true;
+			}
+		}
+		if (changed) this.commit(tasks);
+	}
+	cancel(reason: string): void {
+		const tasks = structuredClone(this.snapshot.tasks);
+		for (const task of tasks)
+			if (!["done", "cancelled"].includes(task.status)) {
+				task.status = "cancelled";
+				task.reason = reason;
+				delete task.lease;
+				delete task.leaseUntil;
+			}
+		this.commit(tasks);
+	}
+	/** A successful, independently validated repair satisfies its original delivery dependency. */
+	acceptRepair(originalId: string, evidence: string[]): void {
+		const tasks = structuredClone(this.snapshot.tasks);
+		const task = tasks.find((candidate) => candidate.id === originalId);
+		if (!task || task.status !== "blocked" || !evidence.length) throw new Error("No blocked repair target");
+		task.status = "done";
+		task.evidence = [...task.evidence, ...evidence];
+		delete task.reason;
+		this.commit(tasks);
+	}
+	/** Operator-driven unblock: the rework entry point for blocked work. The attempt budget is NOT reset — workspaces are keyed by attempt, and extra rework budget means raising maxAttempts. */
+	unblock(taskId: string, reason: string): void {
+		if (!taskId || !reason.trim()) throw new Error("Unblock requires a task and a reason");
+		const tasks = structuredClone(this.snapshot.tasks);
+		const task = tasks.find((candidate) => candidate.id === taskId);
+		if (!task) throw new Error(`Unknown task: ${taskId}`);
+		if (task.status !== "blocked") throw new Error("Only blocked work can be unblocked");
+		task.status = "queued";
+		task.reason = `Unblocked by operator: ${reason}`;
+		delete task.lease;
+		delete task.leaseUntil;
+		this.commit(tasks);
+	}
+	/**
+	 * Pause-style lease release: retry-safe work returns to the queue, unknown-outcome work requires reconciliation.
+	 * Unlike recoverExpired this ignores lease expiry (the caller paused on purpose) but still verifies lease ownership.
+	 */
+	relinquish(lease: Lease, reason: string, now: number): void {
+		if (!reason.trim()) throw new Error("Relinquish requires a reason");
+		const tasks = structuredClone(this.snapshot.tasks);
+		const task = tasks.find((candidate) => candidate.id === lease.taskId);
+		if (
+			!task ||
+			!busy(task) ||
+			task.lease?.token !== lease.token ||
+			task.lease.attempt !== lease.attempt ||
+			task.lease.workerId !== lease.workerId
+		)
+			throw new Error("Stale execution lease");
+		task.status = task.retrySafe && task.attempts < this.options.maxAttempts ? "queued" : "blocked";
+		task.reason = task.status === "queued" ? `Requeued after pause: ${reason}` : `Paused mid-execution: ${reason}`;
+		delete task.lease;
+		delete task.leaseUntil;
+		this.commit(tasks);
 	}
 }
 
@@ -297,7 +423,7 @@ export async function drainReadyTasks(
 			signal.throwIfAborted();
 			if (result.accepted) board.accept(lease, result.evidence, now());
 			else board.block(lease, result.reason ?? "Verification rejected", now());
-		} catch {
+		} catch (error) {
 			// Unknown worker failures are NOT automatically replayed: tools may already have run.
 			try {
 				board.block(
