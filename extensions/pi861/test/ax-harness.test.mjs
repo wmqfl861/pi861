@@ -71,8 +71,14 @@ test("readiness and skipReason name every missing dependency explicitly", () => 
 	const env = { PI861_PG17_TESTS: "1", PI861_TEST_PI_CLI: "x", PI861_AX_COMPOSITE_SNAPSHOT: "snap-test" };
 	for (const scenario of AX_SCENARIOS) {
 		const state = readiness(scenario, env, absent);
-		assert.equal(state.ready, false);
 		assert.deepEqual(state.fixtureGaps, scenario.fixtures, `${scenario.id} reports exactly its missing fixtures`);
+		// review-1 F2 fix: "not ready" is guaranteed only where an absent dependency forces it.
+		// A fixture-less, env-gate-less scenario (AX5 builds synthetic packages only) is
+		// legitimately ready on any tree once its probe files exist - readiness is NOT
+		// snapshot-dependent there, so this test must not assert otherwise.
+		if (scenario.fixtures.length > 0 || scenario.envGates.length > 0)
+			assert.equal(state.ready, false, `${scenario.id} with absent fixtures/gates must not be ready`);
+		else assert.deepEqual([state.fixtureGaps.length, state.envGaps.length], [0, 0], `${scenario.id} has no fixture/env dependencies to report`);
 	}
 	const ax1 = scenarioById("AX1");
 	const reason = skipReason(ax1, readiness(ax1, {}, absent));
@@ -126,6 +132,13 @@ test("CoverageRecorder never aggregates skip/not-run/blocked to pass (G7)", () =
 		const blocked = new CoverageRecorder("AX7", dir);
 		blocked.record("reference+refine combination", "blocked");
 		assert.equal(blocked.snapshot(true).status, "incomplete");
+		// review-1 F1 regression: an EMPTY ledger must never aggregate to "passed", even with a
+		// declared composite snapshot - [].every() is vacuously true, no recorded step = no
+		// proof. This is the fake-green hole the reviewer reproduced on the pre-fix harness.
+		const emptyDeclared = new CoverageRecorder("AX5", dir);
+		assert.equal(emptyDeclared.snapshot(true).status, "incomplete");
+		assert.equal(emptyDeclared.snapshot(false).status, "incomplete");
+		assert.deepEqual(emptyDeclared.snapshot(true).requiredChecks, []);
 		assert.throws(() => recorder.record("bad", "nope"), /unknown outcome/);
 		const written = new CoverageRecorder("AX9", dir);
 		written.record("step", "pass");

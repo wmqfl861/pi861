@@ -344,8 +344,9 @@ export function barrierSatisfied(clock, pairs) {
 }
 
 /**
- * Per-scenario C7 outcome ledger. The aggregate is pass only when every step passed AND the
- * composite snapshot was declared; skip/not-run/blocked never promote (G7).
+ * Per-scenario C7 outcome ledger. The aggregate is pass only when at least one step was
+ * recorded, every recorded step passed, AND the composite snapshot was declared;
+ * skip/not-run/blocked never promote, and an empty ledger never passes (G7, review-1 F1).
  */
 export class CoverageRecorder {
 	constructor(scenarioId, evidenceDir) {
@@ -362,9 +363,13 @@ export class CoverageRecorder {
 	snapshot(compositeDeclared) {
 		const outcomes = Object.fromEntries(OUTCOMES.map((outcome) => [outcome, 0]));
 		for (const step of this.steps) outcomes[step.outcome] += 1;
+		// review-1 F1 fix: an EMPTY ledger is never "passed" - [].every() is vacuously true, so a
+		// scenario that recorded no step at all must stay "incomplete" even with a declared
+		// composite snapshot. No recorded step = no proof (G7).
+		const allPassed = this.steps.length > 0 && this.steps.every((step) => step.outcome === "pass");
 		const status = this.steps.some((step) => step.outcome === "fail")
 			? "failed"
-			: this.steps.every((step) => step.outcome === "pass") && compositeDeclared
+			: allPassed && compositeDeclared
 				? "passed"
 				: "incomplete";
 		return {
