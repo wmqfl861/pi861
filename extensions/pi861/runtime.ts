@@ -1177,6 +1177,9 @@ export default function runtimeExtension(pi: ExtensionAPI): void {
 					sealed: false,
 				}),
 				audit: async (task, _workspace, result, signal) => reviewTask(task, result, signal),
+				// Independent review identity from trusted configuration (AX10): distinct from
+				// every worker id; the runner constructor fail-closes on any collision.
+				reviewerId: `reviewer-${config.agentId ?? "main"}`,
 				onProgress: (event) => {
 					pi.sendMessage(
 						{ customType: "pi861.project-progress", content: JSON.stringify(event), display: true },
