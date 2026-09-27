@@ -12,12 +12,17 @@ export class PiRpcSession {
 	private readonly process: LineProcess;
 	private running = false;
 	private readonly waitForSettled: boolean;
-	constructor(spec: ProcessSpec, options: { waitForSettled?: boolean } = {}) {
+	private readonly rpcTimeoutMs: number;
+	constructor(spec: ProcessSpec, options: { waitForSettled?: boolean; rpcTimeoutMs?: number } = {}) {
+		const rpcTimeoutMs = options.rpcTimeoutMs ?? 30_000;
+		if (!Number.isSafeInteger(rpcTimeoutMs) || rpcTimeoutMs < 1 || rpcTimeoutMs > 2_147_483_647)
+			throw new Error("RPC timeout must be a positive bounded integer");
+		this.rpcTimeoutMs = rpcTimeoutMs;
 		this.process = new LineProcess(spec, 16_777_216);
 		this.waitForSettled = options.waitForSettled ?? false;
 	}
 	async command(type: string, fields: Record<string, unknown>, signal: AbortSignal): Promise<unknown> {
-		const response = await this.process.request({ ...fields, type }, signal);
+		const response = await this.process.request({ ...fields, type }, signal, this.rpcTimeoutMs);
 		if (response.success !== true) throw new Error(`Pi command rejected: ${type}`);
 		return response.data;
 	}
