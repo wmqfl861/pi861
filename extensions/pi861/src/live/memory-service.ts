@@ -149,6 +149,18 @@ function serializeObservation(observation: ToolObservation): { ok: true; payload
 	}
 }
 
+/** Reference storage records carry these source ref prefixes (chunks and manifests). */
+function isReferenceStorageRecord(ref: string): boolean {
+	return ref.startsWith("result:") || ref.startsWith("result-manifest:");
+}
+
+/** Deterministic no-model projection for reference storage records; harmless by layout. */
+const REFERENCE_STORAGE_PROJECTION = {
+	abstract: "Controlled reference storage record; not distilled.",
+	overview: "System-managed controlled-reference payload; the descriptor lives in the manifest record full body.",
+	facts: [],
+} as const;
+
 /**
  * The single automatic collector for one host. Hosts install it through
  * attachMemoryGovernance; a second attach fails, so two capture pipelines can
@@ -169,10 +181,22 @@ export class MemoryGovernance {
 		this.owner = options.owner ?? `pi861:${options.scope}`;
 		this.assembleMaxBytes = options.assembleMaxBytes ?? 6000;
 		this.pendingQueue = new PendingMemoryWrites(options.pending, options.authority, options.pendingCapacity ?? 100);
-		this.results = new PersistentResultStore(options.authority, {
-			scopes: options.resultScopes ?? [options.scope],
-			...(options.resultPageSize !== undefined ? { pageSize: options.resultPageSize } : {}),
-		});
+		// Reference chunk and manifest writes go through the same bounded pending
+		// queue as every other capture: during an authority outage they park as
+		// checkpoint-uncommitted entries instead of surfacing raw connection
+		// errors, and the host pause boundary holds for oversized captures too.
+		this.results = new PersistentResultStore(
+			{
+				get: (scope, id) => options.authority.get(scope, id),
+				put: (input) => this.pendingQueue.put(input),
+				withdraw: (requestId, scope, id, expectedRevision) =>
+					options.authority.withdraw(requestId, scope, id, expectedRevision),
+			},
+			{
+				scopes: options.resultScopes ?? [options.scope],
+				...(options.resultPageSize !== undefined ? { pageSize: options.resultPageSize } : {}),
+			},
+		);
 	}
 
 	// ----- automatic read: lifecycle assembly and event recall (R6.3/R6.4) -----
@@ -323,7 +347,11 @@ export class MemoryGovernance {
 	 * Runs the durable distillation loop with the P1-S enrich port. Claim and
 	 * commit are separate authority transactions with the model call outside any
 	 * storage lock; transient failures back off and stay recoverable, permanent
-	 * failures park in the terminal failed state for manual requeue.
+	 * failures park in the terminal failed state for manual requeue. Reference
+	 * storage records (payload chunks and manifests) complete without a model
+	 * call: they are system-managed records, not distillation input, and the
+	 * durable-reference layout keeps them correct even when a raw authority
+	 * enrich projects them anyway.
 	 */
 	async distill<TContext>(
 		enrich: AuxiliaryEnrich<TContext>,
@@ -331,7 +359,14 @@ export class MemoryGovernance {
 		modelId: string,
 		options: DistillOptions,
 	): Promise<{ completed: number; failed: number; obsolete: number }> {
-		return this.authority.enrich(auxiliaryExtractor(modelId, enrich, context), options);
+		const filtered: MemoryExtractor = {
+			modelId,
+			extract: (record, signal) =>
+				isReferenceStorageRecord(record.source.ref)
+					? Promise.resolve(REFERENCE_STORAGE_PROJECTION)
+					: enrich(context, record, signal),
+		};
+		return this.authority.enrich(filtered, options);
 	}
 
 	async distillationJobs(): Promise<EnrichmentJobView[]> {

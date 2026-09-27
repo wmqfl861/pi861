@@ -176,9 +176,20 @@ function chunkIdentity(owner: string, resultRef: string, index: number): string 
 	return digest(["pi861.result.chunk", owner, resultRef, index]);
 }
 
+/**
+ * The descriptor lives in the manifest record's `full` body. Distillation
+ * projections only ever replace the abstract/overview segments, so keeping the
+ * descriptor (and the payload) in `full` makes reads, metadata and revocation
+ * survive any enrichment pass - including a raw authority.enrich that bypasses
+ * the governance distill wrapper.
+ */
+function manifestIdentity(owner: string, resultRef: string): string {
+	return digest(["pi861.result.manifest", owner, resultRef]);
+}
+
 function storedDescriptor(item: MemoryItem): StoredDescriptor | undefined {
 	try {
-		const parsed: unknown = JSON.parse(item.overview);
+		const parsed: unknown = JSON.parse(item.full);
 		if (!parsed || typeof parsed !== "object") return undefined;
 		const body = parsed as Partial<StoredDescriptor>;
 		const reference = body.reference as Partial<StoredDescriptor["reference"]> | undefined;
@@ -257,9 +268,10 @@ export class PersistentResultStore {
 	}
 
 	/**
-	 * Persists the payload as bounded evidence records. Identical re-stores are
-	 * idempotent: the reference is content-addressed, missing chunks are written
-	 * and existing ones are left untouched (crash-safe fill-in, never an overwrite).
+	 * Persists the payload as bounded evidence records plus a manifest record
+	 * that carries the descriptor in its `full` body (projection-safe). The
+	 * manifest is written last: it is the commit point, so a partial write is
+	 * invisible to readers and re-stores fill in missing chunks idempotently.
 	 */
 	async store(text: string, owner: string, descriptor: ResultDescriptor): Promise<StoredResultReference> {
 		if (!owner) throw new Error("Result owner identity required");
@@ -275,19 +287,25 @@ export class PersistentResultStore {
 			descriptor,
 			lengths: chunks.map((chunk) => chunk.length),
 		};
-		let complete = true;
+		const manifestId = manifestIdentity(owner, resultRef);
+		const manifest = await this.backend.get(descriptor.scope, manifestId);
+		if (manifest) {
+			const existing = storedDescriptor(manifest);
+			if (!existing || existing.reference.resultRef !== resultRef)
+				throw new Error("Result not found");
+			return { resultRef, bytes: stored.reference.bytes, totalCharacters: stored.reference.totalCharacters };
+		}
 		for (const [index, chunk] of chunks.entries()) {
 			const id = chunkIdentity(owner, resultRef, index);
 			const existing = await this.backend.get(descriptor.scope, id);
 			if (existing) continue;
-			complete = false;
 			const item = {
 				id,
 				scope: descriptor.scope,
 				kind: "evidence" as const,
 				status: "candidate" as const,
 				abstract: `Controlled result reference ${resultRef.slice(0, 12)} part ${index + 1}/${chunks.length}`,
-				overview: JSON.stringify(stored),
+				overview: `Controlled result reference chunk ${index + 1} of ${chunks.length}; descriptor lives in the manifest record.`,
 				full: chunk,
 				source: { kind: "tool" as const, ref: `result:${resultRef}` },
 			};
@@ -297,9 +315,20 @@ export class PersistentResultStore {
 				item,
 			});
 		}
-		if (complete) return { resultRef, bytes: stored.reference.bytes, totalCharacters: stored.reference.totalCharacters };
-		const first = await this.backend.get(descriptor.scope, chunkIdentity(owner, resultRef, 0));
-		if (!first) throw new Error("Controlled reference chunk missing after write");
+		await this.backend.put({
+			requestId: digest(["pi861.result.put", owner, resultRef, "manifest"]),
+			expectedRevision: null,
+			item: {
+				id: manifestId,
+				scope: descriptor.scope,
+				kind: "evidence" as const,
+				status: "candidate" as const,
+				abstract: `Controlled result reference ${resultRef.slice(0, 12)} manifest`,
+				overview: `Controlled result reference manifest; payload lives in the chunk records.`,
+				full: JSON.stringify(stored),
+				source: { kind: "tool" as const, ref: `result-manifest:${resultRef}` },
+			},
+		});
 		return { resultRef, bytes: stored.reference.bytes, totalCharacters: stored.reference.totalCharacters };
 	}
 
@@ -341,10 +370,10 @@ export class PersistentResultStore {
 	}
 
 	/**
-	 * Revocation through the record model: every chunk is withdrawn, so the
-	 * tombstone propagates on every node and later reads fail uniformly.
-	 * Returns the number of live chunks withdrawn; revoking an already-revoked
-	 * (or unknown) reference is an idempotent no-op returning zero.
+	 * Revocation through the record model: the manifest and every chunk record
+	 * are withdrawn, so the tombstone propagates on every node and later reads
+	 * fail uniformly. Returns the number of live records withdrawn; revoking an
+	 * already-revoked (or unknown) reference is an idempotent no-op returning zero.
 	 */
 	async revoke(requestId: string, resultRef: string, owner: string): Promise<number> {
 		let located: Awaited<ReturnType<PersistentResultStore["locate"]>>;
@@ -355,6 +384,12 @@ export class PersistentResultStore {
 			throw error;
 		}
 		let withdrawn = 0;
+		const manifestId = manifestIdentity(owner, resultRef);
+		const manifest = await this.backend.get(located.scope, manifestId);
+		if (manifest) {
+			await this.backend.withdraw(`${requestId}:manifest`, located.scope, manifestId, manifest.revision);
+			withdrawn++;
+		}
 		for (const index of located.lengths.keys()) {
 			const id = chunkIdentity(owner, resultRef, index);
 			const item = await this.backend.get(located.scope, id);
@@ -365,13 +400,14 @@ export class PersistentResultStore {
 		return withdrawn;
 	}
 
+	/** Resolves the manifest record; only its `full` body and the record identity are trusted. */
 	private async locate(
 		resultRef: string,
 		owner: string,
 	): Promise<{ scope: string; descriptor: ResultDescriptor; lengths: number[] }> {
 		if (!resultRef || !owner) throw new Error("Result not found");
 		for (const scope of this.scopes) {
-			const item = await this.backend.get(scope, chunkIdentity(owner, resultRef, 0));
+			const item = await this.backend.get(scope, manifestIdentity(owner, resultRef));
 			if (!item) continue;
 			const stored = storedDescriptor(item);
 			if (
