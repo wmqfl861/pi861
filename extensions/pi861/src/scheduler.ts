@@ -133,7 +133,7 @@ export class TaskBoard {
 			visiting.delete(id);
 			visited.add(id);
 		};
-		tasks.forEach((task) => visit(task.id));
+		for (const task of tasks) visit(task.id);
 	}
 	private commit(tasks: TaskRecord[]): void {
 		this.validate(tasks);
@@ -348,7 +348,7 @@ export class TaskBoard {
 	 * Pause-style lease release: retry-safe work returns to the queue, unknown-outcome work requires reconciliation.
 	 * Unlike recoverExpired this ignores lease expiry (the caller paused on purpose) but still verifies lease ownership.
 	 */
-	relinquish(lease: Lease, reason: string, now: number): void {
+	relinquish(lease: Lease, reason: string, _now: number): void {
 		if (!reason.trim()) throw new Error("Relinquish requires a reason");
 		const tasks = structuredClone(this.snapshot.tasks);
 		const task = tasks.find((candidate) => candidate.id === lease.taskId);
@@ -423,7 +423,7 @@ export async function drainReadyTasks(
 			signal.throwIfAborted();
 			if (result.accepted) board.accept(lease, result.evidence, now());
 			else board.block(lease, result.reason ?? "Verification rejected", now());
-		} catch (error) {
+		} catch {
 			// Unknown worker failures are NOT automatically replayed: tools may already have run.
 			try {
 				board.block(

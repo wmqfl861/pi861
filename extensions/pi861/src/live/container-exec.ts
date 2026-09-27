@@ -137,19 +137,15 @@ export function parseContainerExecutionOptions(
 			envAllowlist.push(pattern);
 		}
 	}
-	const namePrefix = typeof value.namePrefix === "string" && value.namePrefix.trim()
-		? value.namePrefix.trim()
-		: defaults.namePrefix;
+	const namePrefix =
+		typeof value.namePrefix === "string" && value.namePrefix.trim() ? value.namePrefix.trim() : defaults.namePrefix;
 	if (!/^[a-z0-9][a-z0-9-]{1,40}$/.test(namePrefix)) fail("namePrefix must be a short lowercase slug");
 	return {
 		image,
 		userId,
 		network,
 		memoryBytes: boundedInteger(value.memoryBytes ?? 536_870_912, "memoryBytes", 33_554_432, 8_589_934_592),
-		cpus:
-			typeof value.cpus === "number"
-				? boundedInteger(value.cpus * 10, "cpus*10", 1, 160) / 10
-				: 1,
+		cpus: typeof value.cpus === "number" ? boundedInteger(value.cpus * 10, "cpus*10", 1, 160) / 10 : 1,
 		pidsLimit: boundedInteger(value.pidsLimit ?? 64, "pidsLimit", 16, 1024),
 		tmpfsBytes: boundedInteger(value.tmpfsBytes ?? 67_108_864, "tmpfsBytes", 1_048_576, 1_073_741_824),
 		mounts,
@@ -167,11 +163,10 @@ export async function probeContainerRuntime(
 	let serverOs = "",
 		serverVersion = "";
 	try {
-		const version = await execute(
-			dockerCommand,
-			["version", "--format", "{{.Server.Os}} {{.Server.Version}}"],
-			{ timeout: timeoutMs, maxBuffer: 65_536 },
-		);
+		const version = await execute(dockerCommand, ["version", "--format", "{{.Server.Os}} {{.Server.Version}}"], {
+			timeout: timeoutMs,
+			maxBuffer: 65_536,
+		});
 		const parts = version.stdout.trim().split(/\s+/);
 		serverOs = parts[0] ?? "";
 		serverVersion = parts[1] ?? "";
@@ -196,10 +191,7 @@ export async function probeContainerRuntime(
 	return { serverOs, serverVersion, imageId };
 }
 
-function allowlistedEnv(
-	allowlist: readonly string[],
-	env: NodeJS.ProcessEnv,
-): Record<string, string> {
+function allowlistedEnv(allowlist: readonly string[], env: NodeJS.ProcessEnv): Record<string, string> {
 	const passed: Record<string, string> = {};
 	for (const entry of allowlist) {
 		if (entry.endsWith("*")) {

@@ -1,7 +1,7 @@
-import { type MemoryRecord, planWithdrawal, validateMemoryRecord } from "../contracts/memory.ts";
 import { formatScope } from "../contracts/identity.ts";
+import { type MemoryRecord, planWithdrawal, validateMemoryRecord } from "../contracts/memory.ts";
 import { IdempotencyConflict, VersionConflict } from "../contracts/storage.ts";
-import { type MemoryPrincipal, type MemoryReceipt, checkPrincipal, requireWrite } from "../memory.ts";
+import { checkPrincipal, type MemoryPrincipal, type MemoryReceipt, requireWrite } from "../memory.ts";
 import {
 	type MemoryRecordWrite,
 	putRecordContentDigest,
@@ -40,7 +40,8 @@ function validateDerivations(state: RecordStoreState, record: MemoryRecord, read
 		const target = liveRecord(state, link.scope, link.id);
 		if (!target) throw new Error(`Unknown derivation source: ${link.scope}/${link.id}`);
 		if (target.status === "withdrawn") throw new Error(`Derivation source is withdrawn: ${link.scope}/${link.id}`);
-		if (target.revision < link.revision) throw new Error(`Derivation revision is in the future: ${link.scope}/${link.id}`);
+		if (target.revision < link.revision)
+			throw new Error(`Derivation revision is in the future: ${link.scope}/${link.id}`);
 	}
 }
 
@@ -86,7 +87,13 @@ export class RecordMemory {
 				throw new Error("Withdrawn memory requires explicit restoration");
 			state.records = state.records.filter((record) => formatScope(record.scope) !== scope || record.id !== id);
 			state.records.push(candidate);
-			const receipt: MemoryReceipt = { requestId: input.requestId, state: "committed", id, scope, revision: candidate.revision };
+			const receipt: MemoryReceipt = {
+				requestId: input.requestId,
+				state: "committed",
+				id,
+				scope,
+				revision: candidate.revision,
+			};
 			state.receipts.push({ requestId: input.requestId, hash: contentDigest, receipt });
 			return receipt;
 		});
@@ -95,7 +102,13 @@ export class RecordMemory {
 	/** Withdrawal propagates transitively through derivedFrom via the frozen planner. */
 	async withdraw(requestId: string, scope: string, id: string, expectedRevision: number): Promise<MemoryReceipt> {
 		requireWrite(this.principal, scope);
-		if (!requestId || requestId.length > 200 || !id || !Number.isSafeInteger(expectedRevision) || expectedRevision < 1)
+		if (
+			!requestId ||
+			requestId.length > 200 ||
+			!id ||
+			!Number.isSafeInteger(expectedRevision) ||
+			expectedRevision < 1
+		)
 			throw new Error("Invalid withdrawal");
 		const contentDigest = withdrawContentDigest(scope, id, expectedRevision);
 		return this.store.update((state) => {
@@ -109,7 +122,12 @@ export class RecordMemory {
 			if (!previous || previous.revision !== expectedRevision)
 				throw new VersionConflict(expectedRevision, previous?.revision ?? 0);
 			if (previous.status === "withdrawn") throw new Error("Memory already withdrawn");
-			const withdrawn: MemoryRecord = { ...previous, status: "withdrawn", revision: previous.revision + 1, updatedAt: Date.now() };
+			const withdrawn: MemoryRecord = {
+				...previous,
+				status: "withdrawn",
+				revision: previous.revision + 1,
+				updatedAt: Date.now(),
+			};
 			state.records = state.records.filter((record) => formatScope(record.scope) !== scope || record.id !== id);
 			state.records.push(withdrawn);
 			for (const fingerprint of recordFingerprints(previous)) state.tombstones.push(fingerprint);

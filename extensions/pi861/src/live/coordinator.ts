@@ -1,7 +1,13 @@
 import { randomUUID } from "node:crypto";
 import type { EvidenceKind } from "../contracts/acceptance.ts";
 import type { ExecutionIdentity } from "../contracts/identity.ts";
-import { issueLease, type PersistentLease, WakeQueue, type WakeEvent, type WakeReason } from "../contracts/lifecycle.ts";
+import {
+	issueLease,
+	type PersistentLease,
+	type WakeEvent,
+	WakeQueue,
+	type WakeReason,
+} from "../contracts/lifecycle.ts";
 import { digest } from "../memory.ts";
 import {
 	type BoardOptions,
@@ -126,7 +132,7 @@ export function validatePlanGraph(
 		if (edges.has(task.id)) throw new Error(`Duplicate plan task: ${task.id}`);
 		edges.set(task.id, { dependsOn: [...task.dependsOn], deliveryDependsOn: [...(task.deliveryDependsOn ?? [])] });
 	}
-	for (const [id, node] of edges)
+	for (const node of edges.values())
 		for (const dependency of [...node.dependsOn, ...node.deliveryDependsOn])
 			if (!edges.has(dependency)) throw new Error(`Plan references unknown dependency: ${dependency}`);
 	const visiting = new Set<string>();
@@ -309,7 +315,7 @@ export class ProjectCoordinator {
 			worker.id,
 			requestId,
 			{ op: "claim", worker, leaseMs },
-			(state, board, queue) => {
+			(state, board, _queue) => {
 				if (state.status !== "active" || !state.goal || !state.group) return null;
 				board.recoverExpired(Date.now());
 				board.wakeParents();
@@ -366,7 +372,7 @@ export class ProjectCoordinator {
 			workerId,
 			requestId,
 			{ op: "heartbeat", lease },
-			(state, board, queue) => {
+			(state, board, _queue) => {
 				if (state.status !== "active") throw new Error("Project is not active");
 				board.heartbeat(lease, Date.now(), leaseMs);
 			},
@@ -394,7 +400,7 @@ export class ProjectCoordinator {
 		);
 	}
 	async unblock(taskId: string, requestId: string, reason: string): Promise<void> {
-		await this.change("operator", requestId, { op: "unblock", taskId, reason }, (state, board, queue) => {
+		await this.change("operator", requestId, { op: "unblock", taskId, reason }, (_state, board, queue) => {
 			board.unblock(taskId, reason);
 			this.record(queue, "manual-unblock", taskId, `Operator unblock: ${reason}`);
 		});
@@ -457,7 +463,8 @@ export class ProjectCoordinator {
 				const task = state.board.tasks.find((item) => item.id === lease.taskId);
 				if (state.status !== "active" || task?.lease?.token !== lease.token || (task.leaseUntil ?? 0) <= Date.now())
 					throw new Error("Stale task for structural evidence");
-				(state.evidence ??= []).push({
+				state.evidence ??= [];
+				state.evidence.push({
 					kind: "structural-check",
 					taskId: lease.taskId,
 					attempt: lease.attempt,
@@ -567,16 +574,21 @@ export class ProjectCoordinator {
 	/** Caller proves the preserved workspace was reconciled and rechecked before clearing the gate. */
 	async reconcileIntegration(baseCommit: string, evidence: string[], requestId: string): Promise<void> {
 		if (!evidence.length) throw new Error("Repair verification evidence required");
-		await this.change("operator", requestId, { op: "reconcile-integration", baseCommit, evidence }, (state, _board, queue) => {
-			if (
-				state.status !== "paused" ||
-				(state.integration?.expiresAt && state.integration.expiresAt > Date.now()) ||
-				baseCommit !== state.baseCommit
-			)
-				throw new Error("Pause, converge and restore the verified base before reconciliation");
-			delete state.integrationFailure;
-			this.record(queue, "manual-unblock", "integration", "Integration reconciled after repair");
-		});
+		await this.change(
+			"operator",
+			requestId,
+			{ op: "reconcile-integration", baseCommit, evidence },
+			(state, _board, queue) => {
+				if (
+					state.status !== "paused" ||
+					(state.integration?.expiresAt && state.integration.expiresAt > Date.now()) ||
+					baseCommit !== state.baseCommit
+				)
+					throw new Error("Pause, converge and restore the verified base before reconciliation");
+				delete state.integrationFailure;
+				this.record(queue, "manual-unblock", "integration", "Integration reconciled after repair");
+			},
+		);
 	}
 	async submit(workerId: string, lease: Lease, artifacts: string[], requestId: string): Promise<void> {
 		if (workerId !== lease.workerId) throw new Error("Foreign task lease");
@@ -606,9 +618,11 @@ export class ProjectCoordinator {
 					if (state.group.usedWork >= state.group.maxWork) throw new Error("Work budget exhausted");
 					state.group.usedWork++;
 				}
-				(state.stages ??= []).push({ taskId: lease.taskId, attempt: lease.attempt, kind, status, at: Date.now() });
-				if (kind === "review" && status === "passed" && reviewer)
-					(state.evidence ??= []).push({
+				state.stages ??= [];
+				state.stages.push({ taskId: lease.taskId, attempt: lease.attempt, kind, status, at: Date.now() });
+				if (kind === "review" && status === "passed" && reviewer) {
+					state.evidence ??= [];
+					state.evidence.push({
 						kind: "independent-review",
 						taskId: lease.taskId,
 						attempt: lease.attempt,
@@ -616,6 +630,7 @@ export class ProjectCoordinator {
 						detail: ["Independent candidate review passed"],
 						at: Date.now(),
 					});
+				}
 			},
 			false,
 		);
@@ -682,7 +697,8 @@ export class ProjectCoordinator {
 					board.accept(lease, verdict.evidence, Date.now());
 					const repaired = board.state.tasks.find((task) => task.id === lease.taskId)?.reworkFor;
 					if (repaired) board.acceptRepair(repaired, verdict.evidence);
-					(state.evidence ??= []).push({
+					state.evidence ??= [];
+					state.evidence.push({
 						kind: "behavioral-check",
 						taskId: lease.taskId,
 						attempt: lease.attempt,
@@ -703,7 +719,7 @@ export class ProjectCoordinator {
 		);
 	}
 	async block(lease: Lease, reason: string, requestId: string): Promise<void> {
-		await this.change(lease.workerId, requestId, { op: "block", lease, reason }, (state, board, queue) => {
+		await this.change(lease.workerId, requestId, { op: "block", lease, reason }, (_state, board, queue) => {
 			board.block(lease, reason, Date.now());
 			this.record(queue, "task-finished", lease.taskId, "Task attempt finished");
 		});
@@ -718,7 +734,8 @@ export class ProjectCoordinator {
 				)
 					throw new Error("Goal is not ready for acceptance");
 				state.status = "completed";
-				(state.evidence ??= []).push({
+				state.evidence ??= [];
+				state.evidence.push({
 					kind: "human-acceptance",
 					taskId: state.goal.id,
 					attempt: 0,

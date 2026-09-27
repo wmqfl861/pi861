@@ -248,7 +248,7 @@ export class PersistentResultStore {
 		if (
 			!options.scopes.length ||
 			!options.scopes.every(isValidScope) ||
-			(new Set(options.scopes).size !== options.scopes.length)
+			new Set(options.scopes).size !== options.scopes.length
 		)
 			throw new Error("Persistent result scopes must be distinct canonical scopes");
 		const pageSize = options.pageSize ?? 16_000;
@@ -279,7 +279,8 @@ export class PersistentResultStore {
 	 */
 	async store(text: string, owner: string, descriptor: ResultDescriptor): Promise<StoredResultReference> {
 		if (!owner) throw new Error("Result owner identity required");
-		if (!text.length || text.length > this.maxCharacters) throw new Error("Result exceeds controlled-reference storage limit");
+		if (!text.length || text.length > this.maxCharacters)
+			throw new Error("Result exceeds controlled-reference storage limit");
 		if (!descriptor.kind || !isValidScope(descriptor.scope) || typeof descriptor.sourceComplete !== "boolean")
 			throw new Error("Invalid result descriptor");
 		// Same digest input as the session-local store when descriptor is a web ResultMetadata.
@@ -295,8 +296,7 @@ export class PersistentResultStore {
 		const manifest = await this.probe(descriptor.scope, manifestId);
 		if (manifest) {
 			const existing = storedDescriptor(manifest);
-			if (!existing || existing.reference.resultRef !== resultRef)
-				throw new Error("Result not found");
+			if (!existing || existing.reference.resultRef !== resultRef) throw new Error("Result not found");
 			return { resultRef, bytes: stored.reference.bytes, totalCharacters: stored.reference.totalCharacters };
 		}
 		for (const [index, chunk] of chunks.entries()) {
@@ -422,7 +422,8 @@ export class PersistentResultStore {
 	}
 
 	/** Resolves the manifest record; only its `full` body and the record identity are trusted. */
-	private async locate(		resultRef: string,
+	private async locate(
+		resultRef: string,
 		owner: string,
 	): Promise<{ scope: string; descriptor: ResultDescriptor; lengths: number[] }> {
 		if (!resultRef || !owner) throw new Error("Result not found");

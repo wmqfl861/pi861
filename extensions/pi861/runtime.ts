@@ -16,7 +16,8 @@ import type { Role, ToolBinding } from "./src/capabilities.ts";
 import { TaskTreeBudget } from "./src/contracts/budget.ts";
 import { IdentityAuthority } from "./src/contracts/identity.ts";
 import { looksSensitive } from "./src/live/capture.ts";
-import { type ExecutionSpec, emptyProject, ProjectCoordinator } from "./src/live/coordinator.ts";
+import { type ExecutionSpec, emptyProject, type PlanTask, ProjectCoordinator } from "./src/live/coordinator.ts";
+import { GoalCommandService } from "./src/live/goal-command.ts";
 import { emptyLayeredMemory, LayeredMemory } from "./src/live/layered-memory.ts";
 import { type ManagedRequest, managedStream } from "./src/live/managed-stream.ts";
 import { attachMemoryGovernance } from "./src/live/memory-service.ts";
@@ -40,8 +41,9 @@ import {
 	type UsageMeasurement,
 } from "./src/live/model-service.ts";
 import { OperationJournal } from "./src/live/operations.ts";
+import type { PiRunResult } from "./src/live/pi-rpc.ts";
 import { PiRpcSession } from "./src/live/pi-rpc.ts";
-import { ProjectRunner } from "./src/live/project-runner.ts";
+import { InProcessWakeChannel, ProjectRunner } from "./src/live/project-runner.ts";
 import { RemoteWorkerClient } from "./src/live/remote-worker.ts";
 import { loadTrustedSkillCases } from "./src/live/skill-cases.ts";
 import { emptySkillState, SkillRepository } from "./src/live/skill-repository.ts";
@@ -666,7 +668,11 @@ export default function runtimeExtension(pi: ExtensionAPI): void {
 				? message.stopReason
 				: "ok";
 		pi.appendEntry("pi861.run-settled.v2", { outcome, timestamp: Date.now() });
-		void flushUserStatements(ctx);
+		// Captured input lands first, then bounded distillation over the authority's own
+		// job table (LayeredMemory in file mode; the P2-M reference fix is verified).
+		void flushUserStatements(ctx).then(() =>
+			config.memory?.autoEnrich === true ? distillMemory(ctx, config.memory?.maxJobsPerWake ?? 2) : undefined,
+		);
 	});
 	pi.on("tool_execution_end", async (event, ctx) => {
 		if (
@@ -685,13 +691,36 @@ export default function runtimeExtension(pi: ExtensionAPI): void {
 		if (outcome.status === "failed")
 			ctx.ui.notify(`Memory capture failed for ${event.toolName}: ${outcome.error ?? "unknown failure"}`, "warning");
 	});
+	/** Bounded distillation batch through the P1-S enrich port on the shared C3 budget. */
+	function distillMemory(ctx: ExtensionContext, maxJobs: number): Promise<unknown> {
+		const modelId = config.memory?.modelId;
+		if (!modelId || !auxiliary) return Promise.resolve(undefined);
+		return governance
+			.distill(
+				(enrichContext, record, signal) => auxiliary.enrich(enrichContext, record, signal),
+				auxContext,
+				modelId,
+				{ signal: wakeController.signal, maxJobs },
+			)
+			.catch((error) =>
+				ctx.ui.notify(
+					`Memory distillation failed: ${error instanceof Error ? error.message.slice(0, 200) : "unknown failure"}`,
+					"warning",
+				),
+			);
+	}
 	pi.registerCommand("memory-maintain", {
-		description: "Report memory maintenance status; distillation is deferred pending the module reference fix",
+		description: "Process a bounded batch of memory distillation jobs",
 		handler: async (_args, ctx) => {
-			// Distillation stays unwired until the P2-M distill/reference-integrity fix is
-			// re-verified (review F1); running it now would corrupt durable references.
-			const jobs = await governance.distillationJobs();
-			ctx.ui.notify(JSON.stringify({ distillation: "deferred-pending-reference-fix", jobs: jobs.length }), "info");
+			if (!config.memory?.modelId) throw new Error("Configure memory.modelId");
+			if (!auxiliary) throw new Error(`Memory distillation is unavailable: ${auxiliaryError}`);
+			const outcome = await governance.distill(
+				(enrichContext, record, signal) => auxiliary.enrich(enrichContext, record, signal),
+				auxContext,
+				config.memory.modelId,
+				{ signal: wakeController.signal, maxJobs: config.memory?.maxJobsPerWake ?? 2 },
+			);
+			ctx.ui.notify(JSON.stringify(outcome), "info");
 		},
 	});
 	pi.registerCommand("mcp", {
@@ -866,158 +895,223 @@ export default function runtimeExtension(pi: ExtensionAPI): void {
 				: undefined,
 	});
 	if (config.project && !workerMode) {
-		pi.registerCommand("goal", {
-			description: "Create a planned parallel project goal; status | pause | resume | accept | clear",
-			handler: async (args, ctx) => {
-				const project = config.project;
-				if (!project) return;
-				const input = args.trim();
-				if (!input || input === "status") {
-					ctx.ui.notify(JSON.stringify(await coordinator.state()), "info");
-					return;
-				}
-				if (input === "pause") {
-					if (projectRunner) await projectRunner.pause();
-					else await coordinator.control("pause");
-					return;
-				}
-				if (input === "accept") {
-					await coordinator.control("accept");
-					return;
-				}
-				if (input === "clear") {
-					if (projectRunner) await projectRunner.pause();
-					await coordinator.control("cancel");
-					return;
-				}
-				const workspaces = new Workspaces(project.repository, project.worktreeRoot);
-				if (input !== "resume") {
-					const base = await workspaces.head();
-					// Read-only Pi planner inspects real source files; its tools exclude shell and writes.
-					const planner = target(project.plannerModelId);
-					const plannerSession = new PiRpcSession({
-						command: process.execPath,
-						args: [
-							project.cli,
-							"--mode",
-							"rpc",
-							"--no-session",
-							"--no-extensions",
-							...(project.workerExtensionPaths ?? []).flatMap((path) => ["-e", resolve(path)]),
-							"--no-skills",
-							"--tools",
-							"read,grep,find,ls",
-							"--provider",
-							planner.provider,
-							"--model",
-							planner.model,
-						],
-						cwd: project.repository,
-						env: project.workerEnv,
-					});
-					let facts: string;
-					try {
-						facts = (
-							await plannerSession.prompt(
-								`Inspect relevant existing source files for this requested goal. Do not modify anything. Report actual architecture, reusable modules and interface boundaries, with paths. Goal: ${input}`,
-								wakeController.signal,
-							)
-						).text;
-					} finally {
-						await plannerSession.close();
-					}
-					if (!auxiliary) throw new Error(`Project planning is unavailable: ${auxiliaryError}`);
-					const tasks = await auxiliary.plan(
-						auxContext,
-						input,
-						facts,
-						{
-							models: config.models?.targets.filter((target) => target.enabled).map((target) => target.id) ?? [],
-							roles: [config.role, ...(config.roles ?? [])].map((role) => role.id),
-							checkIds: project.checks.map((check) => check.id),
-						},
-						wakeController.signal,
-					);
-					await coordinator.create(input, base, tasks);
-				} else await coordinator.control("resume");
-				const state = await coordinator.state();
-				const integrationFile = join(config.stateDirectory, "integration.json");
-				const integration =
-					input === "resume" && existsSync(integrationFile)
-						? (JSON.parse(readFileSync(integrationFile, "utf8")) as Awaited<ReturnType<Workspaces["create"]>>)
-						: await workspaces.create(`integration-${randomUUID()}`, 1, state.baseCommit);
-				writeFileSync(integrationFile, JSON.stringify(integration), { mode: 0o600 });
-				const runtimeEntry = resolve(
-					process.env.PI861_RUNTIME_ENTRY ?? join(dirname(fileURLToPath(import.meta.url)), "runtime.ts"),
-				);
-				const localWorkers = Array.from({ length: project.maxConcurrent }, (_, index) => ({
-					identity: {
-						id: `local-${index}`,
-						capabilities: config.environment ?? [],
-						roleIds: [config.role, ...(config.roles ?? [])].map((role) => role.id),
-						modelIds: config.models?.targets.map((target) => target.id) ?? [],
+		const project = config.project;
+		const workspaces = new Workspaces(project.repository, project.worktreeRoot);
+		const wakeChannel = new InProcessWakeChannel();
+		function planVocabulary() {
+			return {
+				models: config.models?.targets.filter((entry) => entry.enabled).map((entry) => entry.id) ?? [],
+				roles: [config.role, ...(config.roles ?? [])].map((role) => role.id),
+				checkIds: project.checks.map((check) => check.id),
+			};
+		}
+		async function planTasks(objective: string, facts: string, signal: AbortSignal): Promise<PlanTask[]> {
+			if (!auxiliary) throw new Error(`Project planning is unavailable: ${auxiliaryError}`);
+			return auxiliary.plan(auxContext, objective, facts, planVocabulary(), signal);
+		}
+		/** Read-only Pi planner inspects real source files; its tools exclude shell and writes. */
+		async function repositoryFacts(objective: string, signal: AbortSignal): Promise<string> {
+			const planner = target(project.plannerModelId);
+			const plannerSession = new PiRpcSession({
+				command: process.execPath,
+				args: [
+					project.cli,
+					"--mode",
+					"rpc",
+					"--no-session",
+					"--no-extensions",
+					...(project.workerExtensionPaths ?? []).flatMap((path) => ["-e", resolve(path)]),
+					"--no-skills",
+					"--tools",
+					"read,grep,find,ls",
+					"--provider",
+					planner.provider,
+					"--model",
+					planner.model,
+				],
+				cwd: project.repository,
+				env: project.workerEnv,
+			});
+			try {
+				return (
+					await plannerSession.prompt(
+						`Inspect relevant existing source files for this requested goal. Do not modify anything. Report actual architecture, reusable modules and interface boundaries, with paths. Goal: ${objective}`,
+						signal,
+					)
+				).text;
+			} finally {
+				await plannerSession.close();
+			}
+		}
+		/** Independent task-result review; the model call is admitted on the shared C3 service. */
+		async function reviewTask(
+			task: { id: string; title: string; acceptance: string[] },
+			result: PiRunResult,
+			signal: AbortSignal,
+		): Promise<boolean> {
+			const reviewer = target(project.plannerModelId);
+			const verdict = await modelRequests.attempt(
+				{ requestId: modelRequests.newRequestId(), purpose: "auxiliary", target: reviewer, signal },
+				async () =>
+					bodyText(
+						await direct(
+							reviewer,
+							{
+								transcript: {
+									messages: [
+										{
+											role: "user",
+											content: `Independent review of a completed task. Compare the reported execution against the acceptance criteria. Reply with exactly PASS or FAIL on the first line, then at most three short justification lines.\nAcceptance: ${task.acceptance.join("; ")}\nTask: ${task.title}\nReported output: ${result.text.slice(0, 8000)}`,
+											timestamp: Date.now(),
+										},
+									],
+								},
+								maxTokens: 512,
+							},
+							signal,
+						),
+					),
+			);
+			return verdict.trim().toUpperCase().startsWith("PASS");
+		}
+		/** The goal service start callback has no host context; remember the latest command context for notifications. */
+		let goalNotify: ExtensionContext | undefined;
+		function notifyContext(): ExtensionContext {
+			if (!goalNotify) throw new Error("Goal context is not initialized");
+			return goalNotify;
+		}
+		async function startProjectRunner(ctx: ExtensionContext): Promise<void> {
+			const state = await coordinator.state();
+			const integrationFile = join(config.stateDirectory, "integration.json");
+			const integration: Workspace =
+				state.integrationWorkspace ??
+				(existsSync(integrationFile)
+					? (JSON.parse(readFileSync(integrationFile, "utf8")) as Workspace)
+					: undefined) ??
+				(await workspaces.create(`integration-${randomUUID()}`, 1, state.baseCommit));
+			writeFileSync(integrationFile, JSON.stringify(integration), { mode: 0o600 });
+			const runtimeEntry = resolve(
+				process.env.PI861_RUNTIME_ENTRY ?? join(dirname(fileURLToPath(import.meta.url)), "runtime.ts"),
+			);
+			const localWorkers = Array.from({ length: project.maxConcurrent }, (_, index) => ({
+				identity: {
+					id: `local-${index}`,
+					capabilities: config.environment ?? [],
+					roleIds: [config.role, ...(config.roles ?? [])].map((role) => role.id),
+					modelIds: config.models?.targets.map((entry) => entry.id) ?? [],
+				},
+				waitForSettled: true,
+				process: (workspace: Workspace, execution: ExecutionSpec) => ({
+					command: process.execPath,
+					args: [
+						project.cli,
+						"--mode",
+						"rpc",
+						"--no-skills",
+						"--no-extensions",
+						...(project.workerExtensionPaths ?? []).flatMap((path) => ["-e", resolve(path)]),
+						"-e",
+						runtimeEntry,
+						"--session-dir",
+						join(config.stateDirectory, "sessions"),
+					],
+					cwd: workspace.path,
+					env: {
+						...project.workerEnv,
+						PI861_CONFIG: process.env.PI861_CONFIG ?? "",
+						PI861_WORKER: "1",
+						PI861_INITIAL_MODEL_ID: execution.modelId,
+						PI861_ROLE_ID: execution.roleId,
+						PI861_WRITE_SCOPES: JSON.stringify(execution.writeScopes ?? []),
 					},
-					waitForSettled: true,
-					process: (workspace: Workspace, execution: ExecutionSpec) => ({
-						command: process.execPath,
-						args: [
-							project.cli,
-							"--mode",
-							"rpc",
-							"--no-skills",
-							"--no-extensions",
-							...(project.workerExtensionPaths ?? []).flatMap((path) => ["-e", resolve(path)]),
-							"-e",
-							runtimeEntry,
-							"--session-dir",
-							join(config.stateDirectory, "sessions"),
-						],
-						cwd: workspace.path,
-						env: {
-							...project.workerEnv,
-							PI861_CONFIG: process.env.PI861_CONFIG ?? "",
-							PI861_WORKER: "1",
-							PI861_INITIAL_MODEL_ID: execution.modelId,
-							PI861_ROLE_ID: execution.roleId,
-							PI861_WRITE_SCOPES: JSON.stringify(execution.writeScopes ?? []),
-						},
+				}),
+			}));
+			const remoteWorkers = (project.remoteWorkers ?? []).map((worker) => {
+				const token = process.env[worker.tokenEnv];
+				if (!token) throw new Error("Remote worker credential missing");
+				return {
+					identity: worker.identity,
+					remote: new RemoteWorkerClient({
+						url: worker.url,
+						token,
+						allowLoopbackHttp: worker.allowLoopbackHttp,
 					}),
-				}));
-				const remoteWorkers = (project.remoteWorkers ?? []).map((worker) => {
-					const token = process.env[worker.tokenEnv];
-					if (!token) throw new Error("Remote worker credential missing");
-					return {
-						identity: worker.identity,
-						remote: new RemoteWorkerClient({
-							url: worker.url,
-							token,
-							allowLoopbackHttp: worker.allowLoopbackHttp,
+				};
+			});
+			projectRunner = new ProjectRunner({
+				coordinator,
+				workspaces,
+				integration,
+				checks: project.checks,
+				workers: [...localWorkers, ...remoteWorkers],
+				wake: wakeChannel,
+				// Rolling planning under the shared budget: the low-watermark planner only
+				// extends the plan from trusted model/role/check vocabularies.
+				planner: async (planningState, signal) => ({
+					tasks: await planTasks(
+						planningState.objective,
+						JSON.stringify({
+							objective: planningState.objective,
+							board: planningState.board.tasks.map((task) => ({
+								id: task.id,
+								title: task.title,
+								status: task.status,
+							})),
 						}),
-					};
-				});
-				projectRunner = new ProjectRunner({
-					coordinator,
-					workspaces,
-					integration,
-					checks: project.checks,
-					workers: [...localWorkers, ...remoteWorkers],
-					onProgress: (event) => {
-						pi.sendMessage(
-							{ customType: "pi861.project-progress", content: JSON.stringify(event), display: true },
-							{ triggerTurn: false },
-						);
-					},
-				});
-				void projectRunner
-					.start()
-					.then(async () => {
-						ctx.ui.notify(`Project execution settled: ${(await coordinator.state()).status}`, "info");
-					})
-					.catch(() => ctx.ui.notify("Project scheduler failed; inspect durable state", "error"));
-				ctx.ui.notify(
-					`Started ${project.maxConcurrent} worker slots; only ready non-conflicting tasks will run`,
-					"info",
-				);
+						signal,
+					),
+					sealed: false,
+				}),
+				audit: async (task, _workspace, result, signal) => reviewTask(task, result, signal),
+				onProgress: (event) => {
+					pi.sendMessage(
+						{ customType: "pi861.project-progress", content: JSON.stringify(event), display: true },
+						{ triggerTurn: false },
+					);
+				},
+			});
+			void projectRunner
+				.start()
+				.then(async () => {
+					ctx.ui.notify(`Project execution settled: ${(await coordinator.state()).status}`, "info");
+				})
+				.catch(() => ctx.ui.notify("Project scheduler failed; inspect durable state", "error"));
+			ctx.ui.notify(
+				`Started ${project.maxConcurrent} worker slots; only ready non-conflicting tasks will run`,
+				"info",
+			);
+		}
+		const goalCommands = new GoalCommandService({
+			coordinator,
+			workers: [
+				...Array.from({ length: project.maxConcurrent }, (_, index) => ({
+					id: `local-${index}`,
+					capabilities: config.environment ?? [],
+					roleIds: [config.role, ...(config.roles ?? [])].map((role) => role.id),
+					modelIds: config.models?.targets.map((entry) => entry.id) ?? [],
+				})),
+				...(project.remoteWorkers ?? []).map((worker) => worker.identity),
+			],
+			create: async (objective, signal) => ({
+				baseCommit: await workspaces.head(),
+				tasks: await planTasks(objective, await repositoryFacts(objective, signal), signal),
+			}),
+			start: () => startProjectRunner(notifyContext()),
+			pause: async () => {
+				if (projectRunner) await projectRunner.pause();
+				else await coordinator.control("pause");
+			},
+			cancel: async () => {
+				if (projectRunner) await projectRunner.pause();
+				await coordinator.control("cancel");
+			},
+		});
+		pi.registerCommand("goal", {
+			description:
+				"new OBJECTIVE | status | edit TEXT | pause | resume | budget N | unblock TASK REASON | accept | clear",
+			handler: async (args, ctx) => {
+				goalNotify = ctx;
+				ctx.ui.notify(JSON.stringify(await goalCommands.execute(args, wakeController.signal)), "info");
 			},
 		});
 		pi.on("input", async (event) => {

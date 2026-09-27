@@ -20,14 +20,15 @@
  *   PI861_RECORD_EXAMPLE_URL=postgres://... node --experimental-strip-types examples/record-consumer.mjs
  * The database part expects the memory-v3 + storage-v4 migrations to be applied.
  */
-import { createRequire } from "node:module";
+
 import { mkdtemp, rm } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { applyAdoption, validateMemoryRecord } from "../src/contracts/memory.ts";
 import { digest } from "../src/contracts/hash.ts";
+import { applyAdoption, validateMemoryRecord } from "../src/contracts/memory.ts";
+import { emptyRecordStoreState, RecordMemory } from "../src/live/record-store.ts";
 import { FileStateStore } from "../src/live/store.ts";
-import { RecordMemory, emptyRecordStoreState } from "../src/live/record-store.ts";
 import { PostgresMemory } from "../src/postgres.ts";
 
 const principal = {
@@ -37,6 +38,9 @@ const principal = {
 	writeScopes: ["project:demo"],
 };
 
+/**
+ * @returns {import("../src/memory-records.ts").MemoryRecord}
+ */
 function sourceRecord() {
 	return {
 		id: "finding-1",
@@ -53,6 +57,12 @@ function sourceRecord() {
 	};
 }
 
+/**
+ * @param {string} sourceScope
+ * @param {string} sourceId
+ * @param {number} sourceRevision
+ * @returns {import("../src/memory-records.ts").MemoryRecord}
+ */
 function derivedRecord(sourceScope, sourceId, sourceRevision) {
 	return {
 		id: `summary-of-${sourceId}`,
@@ -69,13 +79,19 @@ function derivedRecord(sourceScope, sourceId, sourceRevision) {
 	};
 }
 
-/** The same consumer flow against any record-level authority (file or database). */
+/**
+ * The same consumer flow against any record-level authority (file or database).
+ * @param {string} label
+ * @param {{ putRecord(input: import("../src/memory-records.ts").MemoryRecordWrite): Promise<import("../src/memory.ts").MemoryReceipt>; getRecord(scope: string, id: string): Promise<import("../src/memory-records.ts").MemoryRecord | undefined>; withdraw(requestId: string, scope: string, id: string, expectedRevision: number): Promise<import("../src/memory.ts").MemoryReceipt> }} authority
+ */
 async function run(label, authority) {
 	// 1. Record the candidate evidence.
 	const put = await authority.putRecord({ requestId: `${label}:put`, expectedRevision: null, record: sourceRecord() });
 	// 2. Integration acceptance adopts it: verified provenance is APPENDED by the
 	//    frozen contract (branch completion alone can never mint it).
-	const adopted = applyAdoption(await authority.getRecord("project:demo", put.id), {
+	const stored = await authority.getRecord("project:demo", put.id);
+	if (!stored) throw new Error("record disappeared before adoption");
+	const adopted = applyAdoption(stored, {
 		version: 1,
 		recordId: put.id,
 		scope: "project:demo",
@@ -83,8 +99,14 @@ async function run(label, authority) {
 		acceptanceEvidenceDigest: digest(["acceptance", "evidence", label]),
 		adoptedBy: "goal-acceptance",
 	});
-	const promoted = await authority.putRecord({ requestId: `${label}:adopt`, expectedRevision: put.revision, record: adopted });
-	validateMemoryRecord(await authority.getRecord("project:demo", put.id));
+	const promoted = await authority.putRecord({
+		requestId: `${label}:adopt`,
+		expectedRevision: put.revision,
+		record: adopted,
+	});
+	const reread = await authority.getRecord("project:demo", put.id);
+	if (!reread) throw new Error("record disappeared before validation");
+	validateMemoryRecord(reread);
 	// 3. Distillation writes a derivative bound to the adopted revision; withdrawal of
 	//    the source (or any upstream record) will withdraw it transitively.
 	await authority.putRecord({
@@ -105,7 +127,10 @@ async function run(label, authority) {
 // file lives in a throwaway temp directory, never inside the repository.
 const stateDir = await mkdtemp(join(tmpdir(), "pi861-record-example-"));
 try {
-	const file = new RecordMemory(new FileStateStore(join(stateDir, "records.json"), emptyRecordStoreState()), principal);
+	const file = new RecordMemory(
+		new FileStateStore(join(stateDir, "records.json"), emptyRecordStoreState()),
+		principal,
+	);
 	await run("file", file);
 } finally {
 	await rm(stateDir, { recursive: true, force: true });

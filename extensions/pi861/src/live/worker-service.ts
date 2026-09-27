@@ -156,8 +156,7 @@ export function parseWorkerServiceConfig(raw: string, env: NodeJS.ProcessEnv = p
 		for (const [key, value] of Object.entries(proc.env as Record<string, unknown>)) {
 			if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || typeof value !== "string")
 				throw new Error("process.env must be a map of env names to strings");
-			if (key === tokenEnv)
-				throw new Error("process.env must not forward the worker bearer token env");
+			if (key === tokenEnv) throw new Error("process.env must not forward the worker bearer token env");
 			processEnv[key] = value;
 		}
 	}

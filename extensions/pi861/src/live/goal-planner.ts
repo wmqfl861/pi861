@@ -1,14 +1,10 @@
-import type {
-	AuxiliaryCallContext,
-	AuxiliaryModelInvocations,
-	ProjectPlanEntry,
-} from "./auxiliary-models.ts";
+import type { AuxiliaryCallContext, AuxiliaryModelInvocations, ProjectPlanEntry } from "./auxiliary-models.ts";
 import {
-	validatePlanGraph,
-	validateTaskContracts,
 	type PlanPolicy,
 	type PlanTask,
 	type ProjectState,
+	validatePlanGraph,
+	validateTaskContracts,
 } from "./coordinator.ts";
 
 /**
@@ -59,10 +55,8 @@ export function createGoalPlanner(options: GoalPlannerOptions): GoalPlanner {
 				checkIds: options.vocabulary.checkIds,
 			},
 		);
-		const sealed =
-			typeof options.sealed === "function" ? options.sealed(state) : (options.sealed ?? false);
-		if (sealed && !entries.length)
-			throw new Error("A sealing plan batch must contain at least one task");
+		const sealed = typeof options.sealed === "function" ? options.sealed(state) : (options.sealed ?? false);
+		if (sealed && !entries.length) throw new Error("A sealing plan batch must contain at least one task");
 		return { tasks: entries, sealed };
 	};
 }

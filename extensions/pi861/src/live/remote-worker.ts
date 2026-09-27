@@ -267,8 +267,7 @@ export class RemoteWorkerServer {
 				modelIds: this.config.identity.modelIds,
 				maxConcurrent: this.config.maxConcurrent,
 				inFlight: count("queued") + count("running"),
-				isolation:
-					this.config.isolation ?? { mode: "trusted-local", osSandbox: false },
+				isolation: this.config.isolation ?? { mode: "trusted-local", osSandbox: false },
 				jobs: {
 					queued: count("queued"),
 					running: count("running"),

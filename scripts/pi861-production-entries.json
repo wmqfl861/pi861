@@ -47,6 +47,28 @@
 			"startup": "Operator command: node extensions/pi861/scripts/storage-service.mjs with PI861_STORAGE_DATA_URL, PI861_STORAGE_IDENTITY_URL and PI861_STORAGE_PORT (see the file header). Loopback-only by default; non-loopback binds require TLS; workers authenticate by bearer token resolved server-side. Added by P3-I when the P2-D/P2-M merge brought the script into the integrated tree (P2-D's base predated this manifest)."
 		},
 		{
+			"path": "extensions/pi861/scripts/worker-service.mjs",
+			"kind": "operator-cli",
+			"language": "mjs",
+			"contentOwner": "P2-W",
+			"lint": "root biome.json extensions/pi861/scripts/**/*.mjs",
+			"type": [
+				"extensions/pi861/tsconfig.entries.json (checkJs)"
+			],
+			"startup": "Operator command: node extensions/pi861/scripts/worker-service.mjs with its absolute-path config (trusted-local or OCI container mode; see the file header). Registered by P3-I when the P2-W merge brought the entry into the integrated tree."
+		},
+		{
+			"path": "extensions/pi861/examples/record-consumer.mjs",
+			"kind": "composition-example",
+			"language": "mjs",
+			"contentOwner": "P2-D",
+			"lint": "root biome.json extensions/pi861/examples/**/*.mjs",
+			"type": [
+				"extensions/pi861/tsconfig.entries.json (checkJs)"
+			],
+			"startup": "Operator example: node --experimental-strip-types extensions/pi861/examples/record-consumer.mjs (file authority; PI861_RECORD_EXAMPLE_URL switches to PostgreSQL). Registered by P3-I when the P2-D supplement merge brought the example into the integrated tree."
+		},
+		{
 			"path": "extensions/pi861/scripts/run-acceptance.mjs",
 			"kind": "operator-cli",
 			"language": "mjs",

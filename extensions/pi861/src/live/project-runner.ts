@@ -180,7 +180,11 @@ export class ProjectRunner {
 				);
 				await this.options.workspaces.importCommit(candidate.bundle, candidate.commit);
 				// Legacy two-dimension workspace identity until P2-W publishes createTask (R3.11).
-				workspace = await this.options.workspaces.create(`inspect-${digest(identity).slice(0, 24)}`, 1, candidate.commit);
+				workspace = await this.options.workspaces.create(
+					`inspect-${digest(identity).slice(0, 24)}`,
+					1,
+					candidate.commit,
+				);
 				workspace.baseCommit = baseCommit;
 				result = { text: candidate.text, messages: [], toolCalls: 0, usage: { input: 0, output: 0 } };
 				commit = candidate.commit;
@@ -369,11 +373,7 @@ export class ProjectRunner {
 	 * only after the takeover grace has elapsed (the handoff guard has then confirmed the former
 	 * Git process tree exited).
 	 */
-	private async withIntegrationDirectoryLock<T>(
-		path: string,
-		signal: AbortSignal,
-		fn: () => Promise<T>,
-	): Promise<T> {
+	private async withIntegrationDirectoryLock<T>(path: string, signal: AbortSignal, fn: () => Promise<T>): Promise<T> {
 		const lock = `${path}.intlock`;
 		const graceMs = this.options.integrationGraceMs ?? 15_000;
 		const start = Date.now();
@@ -396,8 +396,7 @@ export class ProjectRunner {
 	}
 	/** The integration worktree must sit exactly on the coordinator's pinned base before a merge. */
 	private async assertIntegrationBase(expectedBase: string): Promise<void> {
-		const head = (await execute("git", ["rev-parse", "HEAD"], { cwd: this.options.integration.path }))
-			.stdout.trim();
+		const head = (await execute("git", ["rev-parse", "HEAD"], { cwd: this.options.integration.path })).stdout.trim();
 		if (head !== expectedBase)
 			throw new Error(`Integration workspace diverged from the pinned base: ${head} != ${expectedBase}`);
 	}
@@ -426,11 +425,7 @@ export class ProjectRunner {
 						`Integration lease from ${held.owner} expired without release; confirm its Git process tree exited before takeover`,
 					);
 			}
-			const handle = await this.options.coordinator.acquireIntegrationLease(
-				this.integrationOwner,
-				leaseMs,
-				graceMs,
-			);
+			const handle = await this.options.coordinator.acquireIntegrationLease(this.integrationOwner, leaseMs, graceMs);
 			if (handle) return handle;
 			await sleep(100, undefined, { signal });
 		}

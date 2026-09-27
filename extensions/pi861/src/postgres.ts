@@ -388,8 +388,10 @@ export class PostgresMemory implements MemoryBackend {
 				);
 				const target = this.storedRecord(found.rows[0]);
 				if (!target) throw new Error(`Unknown derivation source: ${link.scope}/${link.id}`);
-				if (target.status === "withdrawn") throw new Error(`Derivation source is withdrawn: ${link.scope}/${link.id}`);
-				if (target.revision < link.revision) throw new Error(`Derivation revision is in the future: ${link.scope}/${link.id}`);
+				if (target.status === "withdrawn")
+					throw new Error(`Derivation source is withdrawn: ${link.scope}/${link.id}`);
+				if (target.revision < link.revision)
+					throw new Error(`Derivation revision is in the future: ${link.scope}/${link.id}`);
 			}
 			const candidate: MemoryRecord = structuredClone({
 				...input.record,

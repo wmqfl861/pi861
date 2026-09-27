@@ -21,10 +21,10 @@ import {
 	type MemoryReceipt,
 	type MemoryWrite,
 } from "../memory.ts";
-import { type EnrichmentJobView, type MemoryExtractor } from "./extraction.ts";
-import { type MemoryMigrationResult, type MemoryMigrationSource, migrateMemory } from "./memory-migration.ts";
 import type { MemoryRecord, MemoryRecordWrite } from "../memory-records.ts";
 import { PostgresMemory, type SqlConnection, type SqlPool } from "../postgres.ts";
+import type { EnrichmentJobView, MemoryExtractor } from "./extraction.ts";
+import { type MemoryMigrationResult, type MemoryMigrationSource, migrateMemory } from "./memory-migration.ts";
 
 /**
  * P2-D trusted storage service. Workers hold no database credentials: they present a
