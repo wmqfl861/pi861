@@ -31,10 +31,10 @@
 | --- | --- | --- | --- | --- |
 | 环境备置 | `npm ci --ignore-scripts`（仓库根） | 0 | 345 包 | npm-ci.log |
 | K1 前置水合 | `npm run hydrate:model-data`（仓库根） | 0 | 补 gitignored 生成数据目录（`models.generated.ts` 已在树内提交） | k1-hydrate.log |
-| K1 根检查 | `npm run check`（仓库根） | 2（仅 tsgo 阶段） | biome 1459 文件 0 修复（检查后 tracked 树 0 差异）；pinned-deps/runtime-deps/ts-imports/entry-graphs/pi861-entries/shrinkwrap/install-lock 全过；tsgo 22 错（定性见 2.1） | k1-full-check.log, k1-post-status.txt, k1-tsgo-hydrated.log |
+| K1 根检查 | `npm run check`（仓库根） | 2（仅 tsgo 阶段） | biome 1459 文件 0 修复（检查后 tracked 树 0 差异）；pinned-deps/runtime-deps/ts-imports/entry-graphs/pi861-entries/shrinkwrap/install-lock 全过；tsgo 22 错（定性见 2.1）。**注记（复合呈现）**：k1-full-check.log 为水合**前**的全链运行（tsgo 阶段 829 错、exit 2，biome 等前序腿通过）；22 错数值来自水合**后**的单独复跑 k1-tsgo-hydrated.log——两份日志是同一命令先后两次运行的复合呈现 | k1-full-check.log, k1-post-status.txt, k1-tsgo-hydrated.log |
 | K1 browser-smoke | `npm run check:browser-smoke`（&& 链被 tsgo 截断后单独补跑） | 0 | 通过 | k1-browser-smoke.log |
 | K2 扩展类型① | `tsc --noEmit -p tsconfig.json`（extensions/pi861） | 0 | 0 错 | k2-tsc-main.log |
-| K2 扩展类型② | `tsc --noEmit -p tsconfig.entries.json` | 0（水合后） | 0 错；水合前 90 错（manifest 级联）——干净检出必须先水合（第 5 节步骤 3） | k2-tsc-entries{,-hydrated}.log |
+| K2 扩展类型② | `tsc --noEmit -p tsconfig.entries.json` | 0（水合后） | 0 错；水合前 84 错（modelDataManifest unknown 级联；P4-R 报告文本写 90，其所引 k2-tsc-entries.log 实测 84，以日志为准）——干净检出必须先水合（第 5 节步骤 2） | k2-tsc-entries{,-hydrated}.log |
 | K2 模块套件（model） | routing + live-models + model-service + stream-bridge | 0 | 72/72 | k2-suite-model.log |
 | K2 模块套件（skill-mcp） | capabilities + live-skills + live-skill-validation + live-mcp + live-operations | 0 | 66/66 | k2-suite-skillmcp.log |
 | K2 模块套件（memory） | memory + live-memory + result-store | 0 | 44/44 | k2-suite-memory.log |
@@ -106,7 +106,7 @@ cd <dir>
 npm ci --ignore-scripts
 
 # 2) 【C2 前置步骤一，必做】模型数据水合（补 gitignored 生成数据目录）。
-#    缺此步：tsc entries 90 错、tsgo 829 错（环境性级联，非代码错误）。
+#    缺此步：tsc entries 84 错、tsgo 829 错（环境性级联，非代码错误）。
 npm run hydrate:model-data
 
 # 3) K1 根检查（预期：除 tsgo 22 错登记项外全过；&& 链被 tsgo 截断后单跑 browser-smoke）
