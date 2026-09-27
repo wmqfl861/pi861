@@ -101,6 +101,19 @@ export function recordFingerprints(record: MemoryRecord): string[] {
 	];
 }
 
+/**
+ * Record-level write (P2-M consumer surface): carries the COMPLETE C6 record, so
+ * multi-entry provenance chains (adoption's [original source, verified]) and
+ * cross-record derivedFrom links survive the write; the item facade cannot express
+ * either (toRecord always produces a single-entry chain and an empty derivedFrom).
+ * revision/updatedAt are recomputed by the authority and never taken from the wire.
+ */
+export interface MemoryRecordWrite {
+	requestId: string;
+	expectedRevision: number | null;
+	record: MemoryRecord;
+}
+
 /** C4 content digest over the intended write payload; an identical retry presents the identical digest. */
 export function putContentDigest(
 	scope: string,
@@ -126,6 +139,30 @@ export function putContentDigest(
 
 export function withdrawContentDigest(scope: string, id: string, expectedRevision: number): string {
 	return digest(["pi861.memory.withdraw", scope, id, expectedRevision]);
+}
+
+/** Digest over a record-level write: every caller-controlled field of the record. */
+export function putRecordContentDigest(
+	scope: string,
+	id: string,
+	expectedRevision: number | null,
+	record: MemoryRecord,
+): string {
+	return digest([
+		"pi861.memory.put-record",
+		scope,
+		id,
+		expectedRevision,
+		{
+			purpose: record.purpose,
+			abstract: record.abstract,
+			overview: record.overview,
+			full: record.full,
+			status: record.status,
+			provenance: record.provenance,
+			derivedFrom: record.derivedFrom,
+		},
+	]);
 }
 
 /** Read depth per purpose: constraints survive summarization, working state reads at overview depth. */

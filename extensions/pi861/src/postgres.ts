@@ -30,7 +30,9 @@ import {
 } from "./memory.ts";
 import {
 	assembleRecords,
+	type MemoryRecordWrite,
 	putContentDigest,
+	putRecordContentDigest,
 	recordFingerprints,
 	toItem,
 	toRecord,
@@ -338,6 +340,111 @@ export class PostgresMemory implements MemoryBackend {
 			return receipt;
 		});
 	}
+	/**
+	 * Record-level put (P2-M consumer surface): stores the complete C6 record, so
+	 * multi-entry provenance chains (adoption) and cross-record derivedFrom links
+	 * survive. Withdrawal of any upstream record then propagates to these chains
+	 * through the frozen planner. The item facade cannot express either shape.
+	 */
+	async putRecord(input: MemoryRecordWrite): Promise<MemoryReceipt> {
+		validateMemoryRecord(input.record);
+		if (input.record.status === "withdrawn") throw new Error("Use withdraw for record-level removal");
+		const scope = formatScope(input.record.scope);
+		requireWrite(this.principal, scope);
+		const id = input.record.id;
+		if (!input.requestId || input.requestId.length > 200) throw new Error("Invalid record write request");
+		const contentDigest = putRecordContentDigest(scope, id, input.expectedRevision, input.record);
+		return this.mutation(async (connection) => {
+			await connection.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [
+				JSON.stringify([this.principal.tenantId, this.principal.principalId, input.requestId]),
+			]);
+			await connection.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [
+				JSON.stringify([this.principal.tenantId, scope]),
+			]);
+			const stored = await connection.query(
+				"SELECT intent_hash, receipt FROM pi861_memory_receipts WHERE tenant_id=$1 AND principal_id=$2 AND request_id=$3",
+				[this.principal.tenantId, this.principal.principalId, input.requestId],
+			);
+			const replay = stored.rows[0];
+			if (replay) {
+				if (String(replay.intent_hash) !== contentDigest) throw new IdempotencyConflict(input.requestId);
+				return structuredClone(replay.receipt as MemoryReceipt);
+			}
+			const result = await connection.query(
+				"SELECT body FROM pi861_memory_items WHERE tenant_id=$1 AND scope_key=$2 AND memory_id=$3 FOR UPDATE",
+				[this.principal.tenantId, scope, id],
+			);
+			const previous = this.storedRecord(result.rows[0]);
+			if ((previous?.revision ?? null) !== input.expectedRevision)
+				throw new VersionConflict(input.expectedRevision ?? 0, previous?.revision ?? 0);
+			// Derivation links must reference live records within the read scopes; a
+			// withdrawn or missing source never legitimizes a new derivative.
+			for (const link of input.record.derivedFrom) {
+				if (!this.principal.readScopes.includes(link.scope))
+					throw new Error(`Derivation source scope is not readable: ${link.scope}`);
+				const found = await connection.query(
+					"SELECT body FROM pi861_memory_items WHERE tenant_id=$1 AND scope_key=$2 AND memory_id=$3",
+					[this.principal.tenantId, link.scope, link.id],
+				);
+				const target = this.storedRecord(found.rows[0]);
+				if (!target) throw new Error(`Unknown derivation source: ${link.scope}/${link.id}`);
+				if (target.status === "withdrawn") throw new Error(`Derivation source is withdrawn: ${link.scope}/${link.id}`);
+				if (target.revision < link.revision) throw new Error(`Derivation revision is in the future: ${link.scope}/${link.id}`);
+			}
+			const candidate: MemoryRecord = structuredClone({
+				...input.record,
+				revision: (previous?.revision ?? 0) + 1,
+				updatedAt: Date.now(),
+			});
+			validateMemoryRecord(candidate);
+			const fingerprints = recordFingerprints(candidate);
+			const suppressed = await connection.query(
+				"SELECT fingerprint FROM pi861_memory_tombstones WHERE tenant_id=$1 AND scope_key=$2 AND fingerprint=ANY($3::text[])",
+				[this.principal.tenantId, scope, fingerprints],
+			);
+			if (suppressed.rows.length || previous?.status === "withdrawn")
+				throw new Error("Withdrawn memory requires explicit restoration");
+			await this.upsertItem(connection, candidate);
+			await this.appendEvent(connection, candidate, "put");
+			if (candidate.provenance.some((entry) => entry.sourceKind === "user" || entry.sourceKind === "tool")) {
+				await connection.query(
+					"INSERT INTO pi861_memory_jobs(tenant_id,job_id,scope_key,memory_id,source_revision,max_attempts) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(tenant_id,job_id) DO NOTHING",
+					[
+						this.principal.tenantId,
+						digest([scope, candidate.id, candidate.revision]),
+						scope,
+						id,
+						candidate.revision,
+						DEFAULT_MAX_EXTRACTION_ATTEMPTS,
+					],
+				);
+			}
+			await connection.query(
+				"UPDATE pi861_memory_jobs SET state='obsolete', finished_at=clock_timestamp(), lease_token=NULL, lease_expires_at=NULL WHERE tenant_id=$1 AND scope_key=$2 AND memory_id=$3 AND source_revision <> $4 AND state <> 'done'",
+				[this.principal.tenantId, scope, id, candidate.revision],
+			);
+			const receipt: MemoryReceipt = {
+				requestId: input.requestId,
+				state: "committed",
+				id,
+				scope,
+				revision: candidate.revision,
+			};
+			await connection.query(
+				"INSERT INTO pi861_memory_receipts(tenant_id,principal_id,request_id,scope_key,intent_hash,receipt) VALUES($1,$2,$3,$4,$5,$6::jsonb)",
+				[
+					this.principal.tenantId,
+					this.principal.principalId,
+					input.requestId,
+					scope,
+					contentDigest,
+					JSON.stringify(receipt),
+				],
+			);
+			return receipt;
+		});
+	}
+
 	private async upsertItem(connection: SqlConnection, record: MemoryRecord): Promise<void> {
 		const scope = formatScope(record.scope);
 		await connection.query(

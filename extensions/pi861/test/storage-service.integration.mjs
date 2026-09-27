@@ -19,6 +19,7 @@ import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { test } from "node:test";
 import { digest } from "../src/contracts/hash.ts";
+import { applyAdoption } from "../src/contracts/memory.ts";
 import { formatScope } from "../src/contracts/identity.ts";
 import { BudgetExhausted, ProbeInFlight } from "../src/contracts/budget.ts";
 import { IdempotencyConflict } from "../src/contracts/storage.ts";
@@ -187,11 +188,36 @@ test("storage service: identity, scopes, budgets, leases, withdrawal and the HTT
 		assert.equal((await session.get("project:p1", "m1")).revision, 2);
 	});
 
-	await t.test("withdrawal propagates recursively through the derivation chain", async () => {
+	await t.test("record-level writes preserve chains; withdrawal propagates recursively", async () => {
 		// A dedicated source with a fixed provenance ref, so revival assertions are
 		// deterministic regardless of which CAS writer won the previous subtest.
-		await session.put(write("w-src", { id: "src", full: "source evidence" }));
-		const direct = {
+		await session.put(write("w-src", { id: "src", full: "source evidence", status: "candidate" }));
+		// Adoption (P2-M pattern): the frozen contract appends verified provenance, a
+		// chain the item facade cannot express; putRecord persists it whole.
+		const candidate = await session.getRecord("project:p1", "src");
+		assert.equal(candidate.provenance.length, 1);
+		const adopted = applyAdoption(candidate, {
+			version: 1,
+			recordId: "src",
+			scope: "project:p1",
+			adoptedAt: Date.now(),
+			acceptanceEvidenceDigest: digest(["acceptance", "evidence"]),
+			adoptedBy: "integration-acceptance",
+		});
+		const adoptedReceipt = await session.putRecord({ requestId: "w-adopt", expectedRevision: 1, record: adopted });
+		assert.equal(adoptedReceipt.revision, 2);
+		assert.deepEqual((await session.getRecord("project:p1", "src")).provenance.map((entry) => entry.sourceKind), [
+			"user",
+			"verified",
+		]);
+		// putRecord idempotency: identical content replays, different intent conflicts.
+		assert.deepEqual(await session.putRecord({ requestId: "w-adopt", expectedRevision: 1, record: adopted }), adoptedReceipt);
+		await assert.rejects(
+			session.putRecord({ requestId: "w-adopt", expectedRevision: 2, record: { ...adopted, abstract: "other" } }),
+			IdempotencyConflict,
+		);
+		// Cross-record derivation chains via the record surface (no raw SQL fixture).
+		const recordShape = (overrides) => ({
 			id: "derived-direct",
 			scope: { kind: "project", key: "p2" },
 			purpose: "experience",
@@ -199,38 +225,47 @@ test("storage service: identity, scopes, budgets, leases, withdrawal and the HTT
 			overview: "summary of source overview",
 			full: "derived from the source record",
 			provenance: [{ sourceKind: "tool", ref: "event:w-src", at: Date.now() }],
-			derivedFrom: [{ scope: "project:p1", id: "src", revision: 1 }],
+			derivedFrom: [],
 			revision: 1,
 			status: "candidate",
 			updatedAt: Date.now(),
-		};
-		const transitive = {
-			...direct,
-			id: "derived-transitive",
-			abstract: "summary of the summary",
-			full: "derived from the derived record",
-			derivedFrom: [{ scope: "project:p2", id: "derived-direct", revision: 1 }],
-		};
-		for (const record of [direct, transitive]) {
-			const scopeKey = formatScope(record.scope);
-			await migration.query(
-				"INSERT INTO pi861_memory_items(tenant_id,scope_key,memory_id,revision,body,fingerprint) VALUES($1,$2,$3,$4,$5::jsonb,$6)",
-				["t1", scopeKey, record.id, record.revision, JSON.stringify(record), recordFingerprints(record)[0]],
-			);
-			await migration.query(
-				"INSERT INTO pi861_memory_versions(tenant_id,scope_key,memory_id,revision,body) VALUES($1,$2,$3,$4,$5::jsonb)",
-				["t1", scopeKey, record.id, record.revision, JSON.stringify(record)],
-			);
-		}
-		await session.withdraw("w1", "project:p1", "src", 1);
+			...overrides,
+		});
+		await session.putRecord({
+			requestId: "w-direct",
+			expectedRevision: null,
+			record: recordShape({ derivedFrom: [{ scope: "project:p1", id: "src", revision: 2 }] }),
+		});
+		await session.putRecord({
+			requestId: "w-transitive",
+			expectedRevision: null,
+			record: recordShape({
+				id: "derived-transitive",
+				scope: { kind: "project", key: "p1" },
+				abstract: "summary of the summary",
+				full: "derived from the derived record",
+				derivedFrom: [{ scope: "project:p2", id: "derived-direct", revision: 1 }],
+			}),
+		});
+		// Derivation targets must exist and be live.
+		await assert.rejects(
+			session.putRecord({
+				requestId: "w-badlink",
+				expectedRevision: null,
+				record: recordShape({ id: "badlink", derivedFrom: [{ scope: "project:p1", id: "missing", revision: 1 }] }),
+			}),
+			/Unknown derivation source/,
+		);
+		// Recursive withdrawal: source, direct and transitive derivatives all die.
+		await session.withdraw("w1", "project:p1", "src", 2);
 		assert.equal(await session.get("project:p1", "src"), undefined);
 		assert.equal(await session.get("project:p2", "derived-direct"), undefined);
-		assert.equal(await session.get("project:p2", "derived-transitive"), undefined);
+		assert.equal(await session.get("project:p1", "derived-transitive"), undefined);
 		const events = await session.claimEvents(100);
 		const withdrawals = events.filter((event) => event.action === "withdraw");
 		assert.deepEqual(
 			withdrawals.map((event) => `${event.scope}/${event.id}`).sort(),
-			["project:p1/src", "project:p2/derived-direct", "project:p2/derived-transitive"],
+			["project:p1/src", "project:p2/derived-direct", "project:p1/derived-transitive"].sort(),
 		);
 		for (const event of withdrawals) await session.completeEvent(event.sequence, "dispatched");
 		// Completed events leave the pending feed; earlier put events stay pending.
