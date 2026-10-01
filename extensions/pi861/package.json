@@ -6,6 +6,7 @@
   "description": "Experimental policy, scheduling and goal extension for the pi861 fork",
   "engines": { "node": ">=22.19.0" },
   "pi": { "extensions": ["runtime.ts"] },
+  "dependencies": { "typebox": "1.3.27" },
   "scripts": {
     "check": "tsc --noEmit",
     "test": "node --experimental-strip-types --test test/*.test.mjs"
