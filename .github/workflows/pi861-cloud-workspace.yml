@@ -46,3 +46,19 @@ jobs:
             ${{ runner.temp }}/pi861-cloud-workspace.sha256
           if-no-files-found: error
           retention-days: 1
+      - name: Hydrate model metadata without rewriting source catalogs
+        run: npm run hydrate:model-data
+      - name: Export model data and matching Node runtime
+        run: |
+          tar -czf "$RUNNER_TEMP/pi861-cloud-model-data.tgz" -C packages/ai/src/providers data
+          gzip -c "$(command -v node)" > "$RUNNER_TEMP/pi861-cloud-node.gz"
+          sha256sum "$RUNNER_TEMP/pi861-cloud-model-data.tgz" "$RUNNER_TEMP/pi861-cloud-node.gz" > "$RUNNER_TEMP/pi861-cloud-runtime.sha256"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pi861-cloud-runtime-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/pi861-cloud-model-data.tgz
+            ${{ runner.temp }}/pi861-cloud-node.gz
+            ${{ runner.temp }}/pi861-cloud-runtime.sha256
+          if-no-files-found: error
+          retention-days: 1
