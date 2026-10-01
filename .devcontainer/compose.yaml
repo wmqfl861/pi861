@@ -1,0 +1,29 @@
+services:
+  app:
+    image: mcr.microsoft.com/devcontainers/javascript-node:24-bookworm
+    init: true
+    volumes:
+      - ..:/workspaces/pi861:cached
+    network_mode: service:postgres
+    command: sleep infinity
+    depends_on:
+      postgres:
+        condition: service_healthy
+  postgres:
+    image: postgres:17-bookworm
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: pi861-dev-only
+      POSTGRES_DB: pi861_test
+    volumes:
+      - pi861-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d pi861_test"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+# No host port, public forwarding, Docker socket or privileged container.
+# The app shares the database network namespace so the existing loopback-only
+# test safety gate remains strict. This database must contain test data only.
+volumes:
+  pi861-postgres:

@@ -1,0 +1,6 @@
+{
+  "name": "pi861-development-driver",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {"pg": "8.16.3"}
+}

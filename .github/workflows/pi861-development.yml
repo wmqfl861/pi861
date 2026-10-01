@@ -1,0 +1,55 @@
+name: Pi861 development environment
+
+on:
+  push:
+    branches: ['feat/pi861-runtime-v1-*']
+    paths: ['.devcontainer/**', 'scripts/pi861-dev*', 'scripts/hydrate-pi861-test-catalog*', 'scripts/pi861-test-catalog.json', '.github/workflows/pi861-development.yml', 'DEVELOPMENT.md']
+  pull_request:
+    paths: ['.devcontainer/**', 'scripts/pi861-dev*', '.github/workflows/pi861-development.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pi861-development-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  development:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24'
+      - name: Generate initial isolated driver lock for review
+        run: npm install --prefix .devcontainer/driver --package-lock-only --ignore-scripts
+      - name: Validate Compose configuration
+        run: docker compose -f .devcontainer/compose.yaml config --quiet
+      - name: Build and verify the actual development container
+        uses: devcontainers/ci@513af61f4de4f75d37e4438f184ba4358f0fc1ca
+        with:
+          push: never
+          runCmd: node scripts/pi861-dev.mjs verify
+      - name: Export source and installed dependencies for session-side checks
+        if: always()
+        shell: bash
+        run: |
+          git rev-parse HEAD > "$RUNNER_TEMP/pi861-development-head.txt"
+          tar --exclude='./.git/hooks' --exclude='./.artifacts' -czf "$RUNNER_TEMP/pi861-development-workspace.tgz" .
+          sha256sum "$RUNNER_TEMP/pi861-development-workspace.tgz" > "$RUNNER_TEMP/pi861-development-workspace.sha256"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: pi861-development-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/pi861-development-workspace.tgz
+            ${{ runner.temp }}/pi861-development-head.txt
+            ${{ runner.temp }}/pi861-development-workspace.sha256
+            .devcontainer/driver/package-lock.json
+          if-no-files-found: error
+          retention-days: 1

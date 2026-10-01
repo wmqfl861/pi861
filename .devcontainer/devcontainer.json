@@ -1,0 +1,12 @@
+{
+  "name": "Pi861 development (Node 24 + PostgreSQL 17)",
+  "dockerComposeFile": "compose.yaml",
+  "service": "app",
+  "workspaceFolder": "/workspaces/pi861",
+  "remoteUser": "node",
+  "shutdownAction": "stopCompose",
+  "waitFor": "postCreateCommand",
+  "postCreateCommand": ["node", "scripts/pi861-dev.mjs", "setup"],
+  "remoteEnv": {"PI861_DEV_CONTAINER": "1"},
+  "hostRequirements": {"cpus": 2, "memory": "8gb", "storage": "32gb"}
+}
