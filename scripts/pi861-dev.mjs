@@ -50,8 +50,10 @@ export function fixtureConfig(directory) {
     budget: { maxRequests: 20 } };
 }
 
-function run(command, args, options = {}) {
-  const result = spawnSync(command, args, { cwd: root, stdio: "inherit", timeout: 600000, ...options });
+export function run(command, args, options = {}) {
+  // These commands are non-interactive. An inherited open pipe makes the
+  // source CLI wait forever for piped input before it handles --print.
+  const result = spawnSync(command, args, { cwd: root, stdio: ["ignore", "inherit", "inherit"], timeout: 600000, ...options });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`${basename(command)} failed: ${result.status ?? result.signal}`);
   return result;

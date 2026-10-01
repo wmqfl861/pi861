@@ -1,3 +1,12 @@
+# Pi861 二次开发
+
+**[中文开发手册](DEVELOPMENT.md)** · **[在浏览器中创建开发环境](https://codespaces.new/wmqfl861/pi861/tree/feat/pi861-runtime-v1-cloud-20261001)**
+
+开发环境：Node 24 + PostgreSQL 17 + 完整源码；无密钥演示和检查命令见手册。
+Codespaces 实例由你的 GitHub 账户创建；环境可开发不代表产品已完成全部验收。
+
+---
+
 <p align="center">
   <a href="https://pi.dev">
     <img alt="pi logo" src="https://pi.dev/logo-auto.svg" width="128">

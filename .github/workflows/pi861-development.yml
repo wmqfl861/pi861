@@ -5,7 +5,7 @@ on:
     branches: ['feat/pi861-runtime-v1-*']
     paths: ['.devcontainer/**', 'scripts/pi861-dev*', 'scripts/hydrate-pi861-test-catalog*', 'scripts/pi861-test-catalog.json', '.github/workflows/pi861-development.yml', 'DEVELOPMENT.md']
   pull_request:
-    paths: ['.devcontainer/**', 'scripts/pi861-dev*', '.github/workflows/pi861-development.yml']
+    paths: ['.devcontainer/**', 'scripts/pi861-dev*', 'scripts/hydrate-pi861-test-catalog*', 'scripts/pi861-test-catalog.json', '.github/workflows/pi861-development.yml', 'DEVELOPMENT.md']
   workflow_dispatch:
 
 permissions:
@@ -14,6 +14,10 @@ permissions:
 concurrency:
   group: pi861-development-${{ github.ref }}
   cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
   development:
@@ -26,30 +30,34 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: '24'
-      - name: Generate initial isolated driver lock for review
-        run: npm install --prefix .devcontainer/driver --package-lock-only --ignore-scripts
-      - name: Validate Compose configuration
-        run: docker compose -f .devcontainer/compose.yaml config --quiet
-      - name: Build and verify the actual development container
-        uses: devcontainers/ci@513af61f4de4f75d37e4438f184ba4358f0fc1ca
-        with:
-          push: never
-          runCmd: node scripts/pi861-dev.mjs verify
-      - name: Export source and installed dependencies for session-side checks
+      - name: Install pinned Dev Containers CLI without lifecycle scripts
+        run: npm install --prefix "$RUNNER_TEMP/pi861-devcli" --no-save --no-package-lock --ignore-scripts @devcontainers/cli@0.89.0
+      - name: Validate committed development configuration
+        run: |
+          test -f .devcontainer/driver/package-lock.json
+          docker compose -f .devcontainer/compose.yaml config --quiet
+      - name: Start the actual development container and run post-create setup
+        run: |
+          "$RUNNER_TEMP/pi861-devcli/node_modules/.bin/devcontainer" up --workspace-folder "$GITHUB_WORKSPACE" 2>&1 | tee "$RUNNER_TEMP/pi861-development-setup.log"
+      - name: Verify checks, source host, PostgreSQL and the no-key runtime demo
+        run: |
+          "$RUNNER_TEMP/pi861-devcli/node_modules/.bin/devcontainer" exec --workspace-folder "$GITHUB_WORKSPACE" node scripts/pi861-dev.mjs verify 2>&1 | tee "$RUNNER_TEMP/pi861-development-verify.log"
+      - name: Reject automatic tracked source changes
+        run: git diff --exit-code
+      - name: Export the exact committed source without dependencies or credentials
         if: always()
-        shell: bash
         run: |
           git rev-parse HEAD > "$RUNNER_TEMP/pi861-development-head.txt"
-          tar --exclude='./.git/hooks' --exclude='./.artifacts' -czf "$RUNNER_TEMP/pi861-development-workspace.tgz" .
-          sha256sum "$RUNNER_TEMP/pi861-development-workspace.tgz" > "$RUNNER_TEMP/pi861-development-workspace.sha256"
+          git archive --format=zip --prefix=pi861/ --output="$RUNNER_TEMP/pi861-development-source.zip" HEAD
+          sha256sum "$RUNNER_TEMP/pi861-development-source.zip" > "$RUNNER_TEMP/pi861-development-source.sha256"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
           name: pi861-development-${{ github.sha }}
           path: |
-            ${{ runner.temp }}/pi861-development-workspace.tgz
+            ${{ runner.temp }}/pi861-development-source.zip
             ${{ runner.temp }}/pi861-development-head.txt
-            ${{ runner.temp }}/pi861-development-workspace.sha256
-            .devcontainer/driver/package-lock.json
+            ${{ runner.temp }}/pi861-development-source.sha256
+            ${{ runner.temp }}/pi861-development-*.log
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 14

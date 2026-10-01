@@ -6,7 +6,23 @@
   "remoteUser": "node",
   "shutdownAction": "stopCompose",
   "waitFor": "postCreateCommand",
-  "postCreateCommand": ["node", "scripts/pi861-dev.mjs", "setup"],
-  "remoteEnv": {"PI861_DEV_CONTAINER": "1"},
-  "hostRequirements": {"cpus": 2, "memory": "8gb", "storage": "32gb"}
+  "postCreateCommand": [
+    "node",
+    "scripts/pi861-dev.mjs",
+    "setup"
+  ],
+  "remoteEnv": {
+    "PI861_DEV_CONTAINER": "1"
+  },
+  "hostRequirements": {
+    "cpus": 2,
+    "memory": "8gb",
+    "storage": "32gb"
+  },
+  "portsAttributes": {
+    "5432": {
+      "label": "Test PostgreSQL — do not forward",
+      "onAutoForward": "ignore"
+    }
+  }
 }

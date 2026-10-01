@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { fixtureConfig, testEnvironment } from "./pi861-dev.mjs";
+import { fixtureConfig, run, testEnvironment } from "./pi861-dev.mjs";
 
 test("test environment drops credentials, external service opt-ins and Node injection", () => {
   const env = testEnvironment({ PATH: "/bin", HOME: "/real-home", GITHUB_TOKEN: "secret", OPENAI_API_KEY: "secret",
@@ -36,4 +36,11 @@ test("PostgreSQL command refuses non-development environments", () => {
     { encoding: "utf8", env: testEnvironment(process.env, tmpdir()) });
   assert.equal(result.status, 1);
   assert.match(result.stderr, /dedicated dev container/);
+});
+
+// Regression: the first devcontainer demo blocked on readPipedStdin because
+// CI's stdin stayed open. Non-interactive commands must receive EOF.
+test("development commands close stdin instead of waiting for interactive input", () => {
+  const result = run(process.execPath, ["-e", "process.stdin.resume(); process.stdin.on('end', () => process.exit(0));"], { timeout: 2000 });
+  assert.equal(result.status, 0);
 });
