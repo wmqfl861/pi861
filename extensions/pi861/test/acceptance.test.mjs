@@ -144,16 +144,38 @@ test("acceptance manifest schema rejects missing, unknown and smuggled fields", 
 	assert.equal(workers.suite, "workers");
 });
 test("single-worker or duplicate-pid evidence never validates as a worker pair", () => {
+	// CI regression: drive-letter paths are not absolute on POSIX. Keep the
+	// production validator strict and make the positive fixture platform-native.
+	const firstWorkspace = join(tmpdir(), "pi861-worker-1");
+	const secondWorkspace = join(tmpdir(), "pi861-worker-2");
 	const worker = (pid, home) => ({ pid, workspace: home, startedAt: new Date().toISOString() });
-	assert.equal(validateWorkerPairEvidence({ kind: "pi-worker-pair", workers: [worker(1, "C:/w1"), worker(2, "C:/w2")] }).valid, true);
-	const single = validateWorkerPairEvidence({ kind: "pi-worker-pair", workers: [worker(1, "C:/w1")] });
+	assert.equal(validateWorkerPairEvidence({ kind: "pi-worker-pair", workers: [worker(1, firstWorkspace), worker(2, secondWorkspace)] }).valid, true);
+	const single = validateWorkerPairEvidence({ kind: "pi-worker-pair", workers: [worker(1, firstWorkspace)] });
 	assert.equal(single.valid, false);
 	assert.equal(single.workers, 1);
 	assert.equal(single.reason, "fewer than two workers");
-	assert.equal(validateWorkerPairEvidence({ kind: "pi-worker-pair", workers: [worker(7, "C:/w1"), worker(7, "C:/w2")] }).valid, false);
-	assert.equal(validateWorkerPairEvidence({ kind: "pi-worker-pair", workers: [worker(7, "C:/w1"), worker(8, "C:/w1")] }).valid, false);
+	assert.equal(validateWorkerPairEvidence({ kind: "pi-worker-pair", workers: [worker(7, firstWorkspace), worker(7, secondWorkspace)] }).valid, false);
+	assert.equal(validateWorkerPairEvidence({ kind: "pi-worker-pair", workers: [worker(7, firstWorkspace), worker(8, firstWorkspace)] }).valid, false);
 	assert.equal(validateWorkerPairEvidence(null).valid, false);
 	assert.equal(validateWorkerPairEvidence({ kind: "other", workers: [] }).valid, false);
+});
+test("worker pair evidence rejects invalid records without relaxing absolute paths", () => {
+	const worker = (pid, home) => ({ pid, workspace: home, startedAt: "2026-09-23T00:00:00.000Z" });
+	const first = worker(4101, join(tmpdir(), "pi861-worker-1"));
+	const second = worker(4102, join(tmpdir(), "pi861-worker-2"));
+	for (const invalid of [
+		{ ...second, workspace: "relative-worker" },
+		{ ...second, workspace: "" },
+		{ ...second, pid: 0 },
+		{ ...second, pid: -1 },
+		{ ...second, pid: 1.5 },
+		{ ...second, pid: Number.MAX_SAFE_INTEGER + 1 },
+		{ ...second, startedAt: null },
+	]) {
+		const result = validateWorkerPairEvidence({ kind: "pi-worker-pair", workers: [first, invalid] });
+		assert.equal(result.valid, false);
+		assert.equal(result.reason, "invalid worker record");
+	}
 });
 test("acceptance CLI writes matching JSON and Markdown with redacted evidence", async (t) => {
 	const path = workspace(t), config = join(path, "config.json"), output = join(path, "report.json"), markdown = join(path, "report.md");

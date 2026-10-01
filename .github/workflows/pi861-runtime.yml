@@ -2,11 +2,11 @@ name: Pi861 runtime
 
 on:
   push:
-    branches: [feat/pi861-runtime-v1, 'pi861/**', 'feat/pi861-runtime-v1-cont-20260923-*']
-    paths: ['extensions/pi861/**', '.github/workflows/pi861-runtime.yml', 'package.json', 'package-lock.json', 'tsconfig*.json', 'biome.json', 'scripts/check-*.mjs', 'scripts/pi861-production-entries.json', 'packages/ai/**', 'packages/coding-agent/src/**']
+    branches: [feat/pi861-runtime-v1, 'pi861/**', 'feat/pi861-runtime-v1-*']
+    paths: ['extensions/pi861/**', '.github/workflows/pi861-runtime.yml', 'package.json', 'package-lock.json', 'tsconfig*.json', 'biome.json', 'scripts/check-*.mjs', 'scripts/*pi861*', 'packages/ai/**', 'packages/coding-agent/src/**']
   pull_request:
     branches: [main, feat/pi861-runtime-v1]
-    paths: ['extensions/pi861/**', '.github/workflows/pi861-runtime.yml', 'package.json', 'package-lock.json', 'tsconfig*.json', 'biome.json', 'scripts/check-*.mjs', 'scripts/pi861-production-entries.json', 'packages/ai/**', 'packages/coding-agent/src/**']
+    paths: ['extensions/pi861/**', '.github/workflows/pi861-runtime.yml', 'package.json', 'package-lock.json', 'tsconfig*.json', 'biome.json', 'scripts/check-*.mjs', 'scripts/*pi861*', 'packages/ai/**', 'packages/coding-agent/src/**']
   workflow_dispatch:
 
 permissions:
@@ -93,8 +93,17 @@ jobs:
           node-version: '22'
       - run: mkdir -p .artifacts/pi861
       - run: npm ci --ignore-scripts 2>&1 | tee .artifacts/pi861/install.log
-      - name: Generate provider catalog types required by the repository check
-        run: npm --prefix packages/ai run generate-models 2>&1 | tee .artifacts/pi861/model-catalog.log
+      - name: Restore hash-pinned release catalog for deterministic checks
+        run: |
+          mkdir -p "$RUNNER_TEMP/pi861-catalog"
+          (
+            cd "$RUNNER_TEMP/pi861-catalog"
+            npm pack --ignore-scripts @earendil-works/pi-ai@0.86.1
+            tar -xzf earendil-works-pi-ai-0.86.1.tgz
+          )
+          node scripts/hydrate-pi861-test-catalog.mjs "$RUNNER_TEMP/pi861-catalog/package" 2>&1 | tee .artifacts/pi861/model-catalog.log
+      - name: Catalog hydration regression tests
+        run: node --test scripts/hydrate-pi861-test-catalog.test.mjs 2>&1 | tee .artifacts/pi861/catalog-regressions.log
       - name: Full repository check including extension production entries
         run: npm run check 2>&1 | tee .artifacts/pi861/repository-check.log
       - name: Reject automatic source fixes left by the check
@@ -129,25 +138,37 @@ jobs:
       - name: Install source host dependencies
         if: matrix.host == 'source'
         run: npm ci --ignore-scripts 2>&1 | tee .artifacts/pi861/source-install.log
-      - name: Generate source host model catalog
+      - name: Restore source host test catalog
         if: matrix.host == 'source'
-        run: npm --prefix packages/ai run generate-models 2>&1 | tee .artifacts/pi861/source-catalog.log
+        run: |
+          mkdir -p "$RUNNER_TEMP/pi861-catalog"
+          (
+            cd "$RUNNER_TEMP/pi861-catalog"
+            npm pack --ignore-scripts @earendil-works/pi-ai@0.86.1
+            tar -xzf earendil-works-pi-ai-0.86.1.tgz
+          )
+          node scripts/hydrate-pi861-test-catalog.mjs "$RUNNER_TEMP/pi861-catalog/package" 2>&1 | tee .artifacts/pi861/model-catalog.log
       - name: Install isolated published Pi host
         if: matrix.host == 'published'
         run: npm install --prefix extensions/pi861 --no-save --no-package-lock --ignore-scripts @earendil-works/pi-coding-agent@0.86.1 typescript@5.9.3 @types/node@22.19.19 2>&1 | tee .artifacts/pi861/published-install.log
       - name: Archive dependency-only test host
         if: matrix.host == 'published'
-        run: tar -czf "$RUNNER_TEMP/pi861-host.tgz" -C extensions/pi861 node_modules
+        # A relative archive path works with both GNU tar and bsdtar. A Windows
+        # drive-letter colon in RUNNER_TEMP is interpreted as a remote archive.
+        run: tar -czf .artifacts/pi861/pi861-host.tgz -C extensions/pi861 node_modules
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: matrix.host == 'published'
         with:
           name: pi861-isolated-host-${{ matrix.os }}
-          path: ${{ runner.temp }}/pi861-host.tgz
+          path: .artifacts/pi861/pi861-host.tgz
           retention-days: 1
       - name: Check native runtime against actual published Pi types
         if: matrix.host == 'published'
         working-directory: extensions/pi861
         run: node node_modules/typescript/bin/tsc --project tsconfig.host.json --typeRoots node_modules/@types 2>&1 | tee ../../.artifacts/pi861/published-types.log
+      - name: Portable catalog and worker-evidence regression tests
+        if: matrix.host == 'source'
+        run: node --test scripts/hydrate-pi861-test-catalog.test.mjs extensions/pi861/test/acceptance.test.mjs 2>&1 | tee .artifacts/pi861/portable-regressions.log
       - name: Check runtime against current source host types
         if: matrix.host == 'source'
         run: node node_modules/typescript/bin/tsc --project extensions/pi861/tsconfig.host-source.json 2>&1 | tee .artifacts/pi861/source-types.log
