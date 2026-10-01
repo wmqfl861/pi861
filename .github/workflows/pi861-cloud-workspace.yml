@@ -1,0 +1,48 @@
+name: Pi861 cloud workspace
+
+on:
+  push:
+    branches: [feat/pi861-runtime-v1-cloud-20261001]
+    paths: ['.github/workflows/pi861-cloud-workspace.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pi861-cloud-workspace-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/feat/pi861-runtime-v1-cloud-20261001'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24'
+      - name: Install locked dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts
+      - name: Record version and export isolated workspace
+        run: |
+          git rev-parse HEAD > "$RUNNER_TEMP/pi861-cloud-workspace-head.txt"
+          git status --porcelain=v1
+          git diff --exit-code
+          tar --exclude='./.git/hooks' --exclude='./.artifacts' -czf "$RUNNER_TEMP/pi861-cloud-workspace.tgz" .
+          sha256sum "$RUNNER_TEMP/pi861-cloud-workspace.tgz" > "$RUNNER_TEMP/pi861-cloud-workspace.sha256"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pi861-cloud-workspace-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/pi861-cloud-workspace.tgz
+            ${{ runner.temp }}/pi861-cloud-workspace-head.txt
+            ${{ runner.temp }}/pi861-cloud-workspace.sha256
+          if-no-files-found: error
+          retention-days: 1
