@@ -40,9 +40,9 @@ jobs:
           for package in pi-mcp-adapter pi-subagents pi-web-access pi-hermes-memory; do
             version="$(npm view "$package" version)"
             npm view "$package@$version" --json > ".artifacts/pi861-plugins/$package.metadata.json"
-            bash ./pi-test.sh --no-env install -l "npm:$package@$version" 2>&1 | tee ".artifacts/pi861-plugins/$package.install.log"
+            bash ./pi-test.sh --no-env install --approve -l "npm:$package@$version" 2>&1 | tee ".artifacts/pi861-plugins/$package.install.log"
           done
-          bash ./pi-test.sh --no-env list 2>&1 | tee .artifacts/pi861-plugins/list.log
+          bash ./pi-test.sh --no-env list --approve 2>&1 | tee .artifacts/pi861-plugins/list.log
       - name: Preserve the exact installed workspace for source and native-dependency review
         if: always()
         run: |
