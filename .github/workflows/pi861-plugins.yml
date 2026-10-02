@@ -23,7 +23,6 @@ jobs:
     timeout-minutes: 15
     env:
       npm_config_ignore_scripts: 'true'
-      PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi861-plugin-home
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -33,7 +32,8 @@ jobs:
           node-version: '24'
       - name: Restore the existing source development environment
         run: |
-          mkdir -p .artifacts/pi861-plugins "$PI_CODING_AGENT_DIR"
+          mkdir -p .artifacts/pi861-plugins "$RUNNER_TEMP/pi861-plugin-home"
+          echo "PI_CODING_AGENT_DIR=$RUNNER_TEMP/pi861-plugin-home" >> "$GITHUB_ENV"
           node scripts/pi861-dev.mjs setup 2>&1 | tee .artifacts/pi861-plugins/setup.log
       - name: Install exactly the four requested packages through the source Pi CLI
         run: |
