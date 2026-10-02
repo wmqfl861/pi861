@@ -3,7 +3,7 @@ name: Pi861 community plugins
 on:
   push:
     branches: [feat/pi861-runtime-v1-cloud-20261001]
-    paths: ['.github/workflows/pi861-plugins.yml']
+    paths: ['.github/workflows/pi861-plugins.yml', '.pi/settings.json', 'scripts/check-pi861-plugins.mjs']
   workflow_dispatch:
 
 permissions:
@@ -23,6 +23,7 @@ jobs:
     timeout-minutes: 15
     env:
       npm_config_ignore_scripts: 'true'
+      npm_config_save_exact: 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -35,30 +36,28 @@ jobs:
           mkdir -p .artifacts/pi861-plugins "$RUNNER_TEMP/pi861-plugin-home"
           echo "PI_CODING_AGENT_DIR=$RUNNER_TEMP/pi861-plugin-home" >> "$GITHUB_ENV"
           node scripts/pi861-dev.mjs setup 2>&1 | tee .artifacts/pi861-plugins/setup.log
-      - name: Install exactly the four requested packages through the source Pi CLI
+      - name: Install the four reviewed versions through the source Pi CLI
         run: |
-          for package in pi-mcp-adapter pi-subagents pi-web-access pi-hermes-memory; do
-            version="$(npm view "$package" version)"
-            npm view "$package@$version" --json > ".artifacts/pi861-plugins/$package.metadata.json"
-            bash ./pi-test.sh --no-env install --approve -l "npm:$package@$version" 2>&1 | tee ".artifacts/pi861-plugins/$package.install.log"
+          for spec in pi-mcp-adapter@5.0.0 pi-subagents@0.74.0 pi-web-access@0.35.0 pi-hermes-memory@0.9.9; do
+            package="${spec%@*}"
+            npm view "$spec" --json > ".artifacts/pi861-plugins/$package.metadata.json"
+            bash ./pi-test.sh --no-env install --approve -l "npm:$spec" 2>&1 | tee ".artifacts/pi861-plugins/$package.install.log"
           done
           bash ./pi-test.sh --no-env list --approve 2>&1 | tee .artifacts/pi861-plugins/list.log
-      - name: Preserve the exact installed workspace for source and native-dependency review
+      - name: Check plugin loading and real SQLite memory without external services
+        run: node node_modules/tsx/dist/cli.mjs --tsconfig tsconfig.json scripts/check-pi861-plugins.mjs 2>&1 | tee .artifacts/pi861-plugins/verification.log
+      - name: Run the complete repository check
+        run: npm run check 2>&1 | tee .artifacts/pi861-plugins/repository-check.log
+      - name: Reject changes to committed configuration and source
+        run: git diff --exit-code
+      - name: Preserve version and resolved dependency evidence
         if: always()
         run: |
-          git rev-parse HEAD > "$RUNNER_TEMP/pi861-plugins-head.txt"
-          tar --exclude='./.git/hooks' --exclude='./.artifacts' -czf "$RUNNER_TEMP/pi861-plugins-workspace.tgz" .
-          sha256sum "$RUNNER_TEMP/pi861-plugins-workspace.tgz" > "$RUNNER_TEMP/pi861-plugins-workspace.sha256"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
-        with:
-          name: pi861-plugins-workspace-${{ github.sha }}
-          path: |
-            ${{ runner.temp }}/pi861-plugins-workspace.tgz
-            ${{ runner.temp }}/pi861-plugins-head.txt
-            ${{ runner.temp }}/pi861-plugins-workspace.sha256
-          if-no-files-found: error
-          retention-days: 1
+          git rev-parse HEAD > .artifacts/pi861-plugins/head.txt
+          cp .pi/settings.json .artifacts/pi861-plugins/settings.json
+          if test -f .pi/npm/package-lock.json; then
+            cp .pi/npm/package-lock.json .artifacts/pi861-plugins/installed-package-lock.json
+          fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
