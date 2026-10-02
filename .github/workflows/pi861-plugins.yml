@@ -1,0 +1,68 @@
+name: Pi861 community plugins
+
+on:
+  push:
+    branches: [feat/pi861-runtime-v1-cloud-20261001]
+    paths: ['.github/workflows/pi861-plugins.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pi861-plugins-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  install:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      npm_config_ignore_scripts: 'true'
+      PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi861-plugin-home
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24'
+      - name: Restore the existing source development environment
+        run: |
+          mkdir -p .artifacts/pi861-plugins "$PI_CODING_AGENT_DIR"
+          node scripts/pi861-dev.mjs setup 2>&1 | tee .artifacts/pi861-plugins/setup.log
+      - name: Install exactly the four requested packages through the source Pi CLI
+        run: |
+          for package in pi-mcp-adapter pi-subagents pi-web-access pi-hermes-memory; do
+            version="$(npm view "$package" version)"
+            npm view "$package@$version" --json > ".artifacts/pi861-plugins/$package.metadata.json"
+            bash ./pi-test.sh --no-env install -l "npm:$package@$version" 2>&1 | tee ".artifacts/pi861-plugins/$package.install.log"
+          done
+          bash ./pi-test.sh --no-env list 2>&1 | tee .artifacts/pi861-plugins/list.log
+      - name: Preserve the exact installed workspace for source and native-dependency review
+        if: always()
+        run: |
+          git rev-parse HEAD > "$RUNNER_TEMP/pi861-plugins-head.txt"
+          tar --exclude='./.git/hooks' --exclude='./.artifacts' -czf "$RUNNER_TEMP/pi861-plugins-workspace.tgz" .
+          sha256sum "$RUNNER_TEMP/pi861-plugins-workspace.tgz" > "$RUNNER_TEMP/pi861-plugins-workspace.sha256"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: pi861-plugins-workspace-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/pi861-plugins-workspace.tgz
+            ${{ runner.temp }}/pi861-plugins-head.txt
+            ${{ runner.temp }}/pi861-plugins-workspace.sha256
+          if-no-files-found: error
+          retention-days: 1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: pi861-plugins-evidence-${{ github.sha }}
+          path: .artifacts/pi861-plugins/
+          if-no-files-found: error
+          retention-days: 14
