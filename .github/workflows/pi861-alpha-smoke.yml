@@ -3,7 +3,7 @@ name: Pi861 Alpha Luna smoke
 on:
   push:
     branches: ['feat/pi861-runtime-v1-*']
-    paths: ['.pi/alpha/luna-smoke.json', 'scripts/pi861-alpha-smoke*', '.github/workflows/pi861-alpha-smoke.yml']
+    paths: ['.pi/alpha/luna-smoke.json', 'scripts/pi861-alpha-smoke*', 'scripts/pi861-alpha-local-smoke*', '.github/workflows/pi861-alpha-smoke.yml']
   workflow_dispatch:
     inputs:
       live:
@@ -51,7 +51,7 @@ jobs:
           done > .artifacts/pi861-alpha-smoke/install.log 2>&1
       - name: Local contract and real Pi session tests with simulated responses
         run: |
-          node node_modules/tsx/dist/cli.mjs --tsconfig tsconfig.json --test scripts/pi861-alpha.test.mjs scripts/pi861-alpha-smoke.test.mjs 2>&1 | tee .artifacts/pi861-alpha-smoke/tests.log
+          node node_modules/tsx/dist/cli.mjs --tsconfig tsconfig.json --test scripts/pi861-alpha.test.mjs scripts/pi861-alpha-smoke.test.mjs scripts/pi861-alpha-local-smoke.test.mjs 2>&1 | tee .artifacts/pi861-alpha-smoke/tests.log
           node node_modules/tsx/dist/cli.mjs --tsconfig tsconfig.json scripts/pi861-alpha-smoke.mjs fixture > .artifacts/pi861-alpha-smoke/fixture.log
           npm run check 2>&1 | tee .artifacts/pi861-alpha-smoke/repository-check.log
           git diff --exit-code
