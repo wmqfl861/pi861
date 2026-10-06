@@ -1,10 +1,4 @@
-export type AlphaPhase =
-	| "queued"
-	| "researching"
-	| "reviewing"
-	| "accepted"
-	| "blocked"
-	| "cancelled";
+export type AlphaPhase = "queued" | "researching" | "reviewing" | "accepted" | "blocked" | "cancelled";
 
 export type AlphaEvent =
 	| { type: "admit"; requirementVersion: string; mainModel: string; shadowModel: string }
