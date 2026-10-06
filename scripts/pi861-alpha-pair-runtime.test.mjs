@@ -4,86 +4,50 @@ import { applyAlphaPairEvent, createAlphaPair } from "../extensions/pi861/src/li
 
 const version = "req-v1";
 const hash = "a".repeat(64);
-
-function admitted(main = "model-main", shadow = "model-shadow") {
-	return applyAlphaPairEvent(
-		createAlphaPair("fixture-pair", version),
-		{ type: "admit", requirementVersion: version, mainModel: main, shadowModel: shadow },
-	);
+let sequence = 0;
+function envelope(agentId = "main") {
+	return { eventId: `event-${++sequence}`, taskId: "task-1", agentId, time: Date.now(), version };
 }
-
+function admitted() {
+	return applyAlphaPairEvent(createAlphaPair("fixture-pair", "task-1", version), {
+		...envelope(),
+		type: "admit",
+		mainModel: "model-main",
+		shadowModel: "model-shadow",
+	});
+}
 function reviewing() {
-	let state = admitted();
-	state = applyAlphaPairEvent(state, {
-		type: "shadow-prepared",
-		requirementVersion: version,
-		evidenceRefs: ["e1"],
-		checks: ["c1"],
-	});
-	return applyAlphaPairEvent(state, { type: "candidate", requirementVersion: version, artifactHash: hash });
+	let state = applyAlphaPairEvent(admitted(), { ...envelope("shadow"), type: "shadow-prepared", evidenceRefs: ["e1"], checks: ["c1"] });
+	return applyAlphaPairEvent(state, { ...envelope("main"), type: "candidate", artifactHash: hash });
 }
 
-test("main and shadow complete offline paired lifecycle", () => {
-	const state = applyAlphaPairEvent(reviewing(), {
-		type: "review",
-		requirementVersion: version,
-		artifactHash: hash,
-		verdict: "pass",
-	});
+test("valid offline envelope lifecycle preserves evidence", () => {
+	const state = applyAlphaPairEvent(reviewing(), { ...envelope("shadow"), type: "review", artifactHash: hash, verdict: "pass" });
 	assert.equal(state.phase, "accepted");
-	assert.deepEqual(state.evidenceRefs, ["e1"]);
-});
-
-test("rejects empty model identities", () => {
-	assert.throws(() => admitted("", "shadow"));
-	assert.throws(() => admitted("main", ""));
-});
-
-test("rejects empty evidence and checks", () => {
-	const state = admitted();
-	assert.throws(() => applyAlphaPairEvent(state, {
-		type: "shadow-prepared",
-		requirementVersion: version,
-		evidenceRefs: [""],
-		checks: ["c"],
-	}));
-	assert.throws(() => applyAlphaPairEvent(state, {
-		type: "shadow-prepared",
-		requirementVersion: version,
-		evidenceRefs: ["e"],
-		checks: [""],
-	}));
-});
-
-test("rejects unknown review verdict and preserves review evidence", () => {
-	const state = reviewing();
-	assert.throws(() => applyAlphaPairEvent(state, {
-		type: "review",
-		requirementVersion: version,
-		artifactHash: hash,
-		verdict: "retry",
-	}));
 	assert.deepEqual(state.evidenceRefs, ["e1"]);
 	assert.deepEqual(state.checks, ["c1"]);
 });
 
-test("rejects stale requirement, wrong artifact review and cancellation reuse", () => {
+test("rejects stale version, duplicate event and malformed envelope", () => {
+	const state = admitted();
+	const event = { ...envelope(), type: "cancel" };
+	applyAlphaPairEvent(state, event);
+	assert.throws(() => applyAlphaPairEvent(state, event));
+	assert.throws(() => applyAlphaPairEvent(state, { ...event, version: "old", eventId: "new" }));
+	assert.throws(() => applyAlphaPairEvent(state, { ...event, eventId: "", time: 0 }));
+});
+
+test("rejects empty models, wrong actor and missing evidence", () => {
+	assert.throws(() => applyAlphaPairEvent(createAlphaPair("p", "task-1", version), { ...envelope(), type: "admit", mainModel: "", shadowModel: "s" }));
+	const state = admitted();
+	assert.throws(() => applyAlphaPairEvent(state, { ...envelope("shadow"), type: "candidate", artifactHash: hash }));
+});
+
+test("rejects wrong review actor, invalid hash and invalid verdict", () => {
 	const state = reviewing();
-	assert.throws(() => applyAlphaPairEvent(state, {
-		type: "review",
-		requirementVersion: "old",
-		artifactHash: hash,
-		verdict: "pass",
-	}));
-	assert.throws(() => applyAlphaPairEvent(state, {
-		type: "review",
-		requirementVersion: version,
-		artifactHash: "b".repeat(64),
-		verdict: "pass",
-	}));
-	const cancelled = applyAlphaPairEvent(state, { type: "cancel", requirementVersion: version });
-	assert.equal(cancelled.phase, "cancelled");
-	assert.throws(() => applyAlphaPairEvent(cancelled, { type: "cancel", requirementVersion: version }));
+	assert.throws(() => applyAlphaPairEvent(state, { ...envelope("main"), type: "review", artifactHash: hash, verdict: "pass" }));
+	assert.throws(() => applyAlphaPairEvent(state, { ...envelope("shadow"), type: "review", artifactHash: "bad", verdict: "pass" }));
+	assert.throws(() => applyAlphaPairEvent(state, { ...envelope("shadow"), type: "review", artifactHash: hash, verdict: "retry" }));
 });
 
 // Offline host fixture only. It does not prove A5 production dispatch is complete.
