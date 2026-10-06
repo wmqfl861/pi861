@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "mode": "same-model-smoke-only",
+  "provider": "pi-alpha-smoke",
+  "model": "gpt-6-luna",
+  "thinking": "max",
+  "api": "openai-responses",
+  "baseUrlEnv": "PI_ALPHA_TEST_BASE_URL",
+  "apiKeyEnv": "PI_ALPHA_TEST_API_KEY",
+  "allowSameModel": true,
+  "independentReview": false,
+  "allowPlainHttp": true,
+  "maxRequests": 32,
+  "maxConcurrent": 2,
+  "maxOutputTokens": 4096,
+  "requestTimeoutMs": 30000,
+  "sessionTimeoutMs": 90000,
+  "totalTimeoutMs": 240000,
+  "pricing": null,
+  "note": "User-authorized connectivity smoke only. All 14 roles share this configuration. No production activation, quality certification, automatic model fallback, external search or business tools. Credentials remain outside Git."
+}

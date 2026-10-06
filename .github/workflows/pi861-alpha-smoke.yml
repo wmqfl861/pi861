@@ -1,0 +1,76 @@
+name: Pi861 Alpha Luna smoke
+
+on:
+  push:
+    branches: ['feat/pi861-runtime-v1-*']
+    paths: ['.pi/alpha/luna-smoke.json', 'scripts/pi861-alpha-smoke*', '.github/workflows/pi861-alpha-smoke.yml']
+  workflow_dispatch:
+    inputs:
+      live:
+        description: 'Explicitly authorize bounded calls to your gateway (same-model smoke only)'
+        type: boolean
+        default: false
+      base_url:
+        description: 'Your gateway /v1 URL. Never put the API key here.'
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pi861-alpha-luna-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      npm_config_ignore_scripts: 'true'
+      npm_config_save_exact: 'true'
+      TERM: xterm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24'
+      - name: Prepare isolated source environment
+        run: |
+          mkdir -p .artifacts/pi861-alpha-smoke "$RUNNER_TEMP/alpha-smoke-home"
+          echo "PI_CODING_AGENT_DIR=$RUNNER_TEMP/alpha-smoke-home" >> "$GITHUB_ENV"
+          node scripts/pi861-dev.mjs setup > .artifacts/pi861-alpha-smoke/setup.log 2>&1
+          for spec in npm:pi-mcp-adapter@5.0.0 npm:pi-subagents@0.74.0 npm:pi-web-access@0.35.0 npm:pi-hermes-memory@0.9.9; do
+            bash ./pi-test.sh --no-env install --approve -l "$spec"
+          done > .artifacts/pi861-alpha-smoke/install.log 2>&1
+      - name: Local contract and real Pi session tests with simulated responses
+        run: |
+          node node_modules/tsx/dist/cli.mjs --tsconfig tsconfig.json --test scripts/pi861-alpha.test.mjs scripts/pi861-alpha-smoke.test.mjs 2>&1 | tee .artifacts/pi861-alpha-smoke/tests.log
+          node node_modules/tsx/dist/cli.mjs --tsconfig tsconfig.json scripts/pi861-alpha-smoke.mjs fixture > .artifacts/pi861-alpha-smoke/fixture.log
+          npm run check 2>&1 | tee .artifacts/pi861-alpha-smoke/repository-check.log
+          git diff --exit-code
+      - name: Explicit manual live test using a repository secret only
+        if: github.event_name == 'workflow_dispatch' && inputs.live == true
+        env:
+          PI_ALPHA_TEST_BASE_URL: ${{ inputs.base_url }}
+          PI_ALPHA_TEST_API_KEY: ${{ secrets.PI_ALPHA_TEST_API_KEY }}
+          PI_OFFLINE: '1'
+        run: |
+          if [ -z "$PI_ALPHA_TEST_API_KEY" ] || [ -z "$PI_ALPHA_TEST_BASE_URL" ]; then
+            echo 'Live test blocked: repository secret PI_ALPHA_TEST_API_KEY and base_url input are required.'
+            exit 1
+          fi
+          node node_modules/tsx/dist/cli.mjs --tsconfig tsconfig.json scripts/pi861-alpha-smoke.mjs live > .artifacts/pi861-alpha-smoke/live.log 2>&1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: pi861-alpha-smoke-${{ github.sha }}
+          path: .artifacts/pi861-alpha-smoke/
+          if-no-files-found: error
+          retention-days: 14
