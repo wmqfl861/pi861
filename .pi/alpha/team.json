@@ -1,0 +1,306 @@
+{
+  "schemaVersion": 1,
+  "id": "pi-alpha",
+  "version": "0.1.0",
+  "status": "configured-unarmed",
+  "purpose": "建立能自动研究、动态组队和流程设计的平台；这是首版研发团队，不是所有业务的固定团队。",
+  "baselineCommit": "1381dda4a8abf0f085766fb8b4a47dd623f806b1",
+  "bootstrapOwner": {
+    "kind": "current-assistant-session",
+    "responsibilities": [
+      "research",
+      "planning",
+      "self-critique",
+      "configuration-and-local-verification"
+    ],
+    "independentReviewPerformed": false
+  },
+  "execution": {
+    "engine": "pi-native",
+    "externalAgentRunnersAllowed": false,
+    "liveEnabled": false,
+    "liveDispatcherImplemented": false,
+    "maxModelCallsInFlight": 4,
+    "reserveSlotsPerPair": 2,
+    "maxPairsInFlight": 2,
+    "recursiveShadows": false,
+    "defaultProfile": "read-only-research",
+    "sameModelFallbackAllowed": false
+  },
+  "shadowProtocol": {
+    "start": "same-admission-batch",
+    "initialContext": "fresh",
+    "rawBriefShared": true,
+    "producerTranscriptInitiallyShared": false,
+    "producerArtifactGate": "shadow-preparation-required",
+    "criticalFindings": "notify-immediately",
+    "routineFindings": "checkpoint-batch",
+    "publicSecondDeliverableRequired": false,
+    "internalEvidenceRequired": true,
+    "coauthoredPartsNeedFreshReview": true
+  },
+  "researchPolicy": {
+    "searchCountIsCompletion": false,
+    "fullTextForMaterialClaims": true,
+    "sourceVersionRequired": true,
+    "counterevidenceRequired": true,
+    "budgetExhaustionMeans": "blocked",
+    "missingMethodAction": "hypothesis-baseline-experiment",
+    "noveltyClaimRequiresIndependentEvidence": true
+  },
+  "roles": [
+    {
+      "id": "D0",
+      "slug": "coordinator",
+      "title": "总协调",
+      "responsibility": "任务契约、研究路线、依赖派工、预算与诚实交接",
+      "main": "alpha-coordinator",
+      "shadow": "alpha-coordinator-shadow",
+      "skills": [
+        "pi-alpha-core",
+        "pi-alpha-evidence",
+        "pi-alpha-experiment",
+        "pi-alpha-planning"
+      ],
+      "bootstrapTools": [
+        "read",
+        "grep",
+        "find",
+        "ls",
+        "web_search",
+        "fetch_content",
+        "get_search_content",
+        "source_check"
+      ],
+      "futureWriteScopeRequests": [
+        ".pi/alpha/work-orders.json",
+        "docs/pi861/alpha/"
+      ],
+      "deliverables": [
+        "需求覆盖表",
+        "就绪/阻塞工作包",
+        "决策与预算记录"
+      ],
+      "challengeFocus": "目标含糊、漏需求、重复派工、把阻塞写成完成"
+    },
+    {
+      "id": "D1",
+      "slug": "architect",
+      "title": "架构与集成",
+      "responsibility": "共享契约、状态与恢复边界、公共接口、最终集成",
+      "main": "alpha-architect",
+      "shadow": "alpha-architect-shadow",
+      "skills": [
+        "pi-alpha-core",
+        "pi-alpha-evidence",
+        "pi-alpha-experiment",
+        "pi-alpha-architecture"
+      ],
+      "bootstrapTools": [
+        "read",
+        "grep",
+        "find",
+        "ls",
+        "web_search",
+        "fetch_content",
+        "get_search_content",
+        "source_check"
+      ],
+      "futureWriteScopeRequests": [
+        "extensions/pi861/src/contracts/",
+        "extensions/pi861/runtime.ts",
+        "extensions/pi861/src/live/compilers.ts"
+      ],
+      "deliverables": [
+        "接口提案",
+        "失败轨迹",
+        "集成差异与检查日志"
+      ],
+      "challengeFocus": "重复调度、协议不兼容、恢复重复副作用、共享文件双写"
+    },
+    {
+      "id": "D2",
+      "slug": "research-engineer",
+      "title": "研究引擎",
+      "responsibility": "研究问题队列、原始来源、反证、时效与充分性检查",
+      "main": "alpha-research-engineer",
+      "shadow": "alpha-research-engineer-shadow",
+      "skills": [
+        "pi-alpha-core",
+        "pi-alpha-evidence",
+        "pi-alpha-experiment",
+        "pi-alpha-research"
+      ],
+      "bootstrapTools": [
+        "read",
+        "grep",
+        "find",
+        "ls",
+        "web_search",
+        "fetch_content",
+        "get_search_content",
+        "source_check"
+      ],
+      "futureWriteScopeRequests": [
+        "extensions/pi861/src/live/research/"
+      ],
+      "deliverables": [
+        "结论—证据账本",
+        "研究停止或升级理由",
+        "关键假设实验"
+      ],
+      "challengeFocus": "搜索摘要当证据、转载当独立来源、资料过期、盲信教程"
+    },
+    {
+      "id": "D3",
+      "slug": "team-designer",
+      "title": "团队与流程设计",
+      "responsibility": "方法卡、任务契约、最小必要组队、主影配对、蓝图验证",
+      "main": "alpha-team-designer",
+      "shadow": "alpha-team-designer-shadow",
+      "skills": [
+        "pi-alpha-core",
+        "pi-alpha-evidence",
+        "pi-alpha-experiment",
+        "pi-alpha-team-design"
+      ],
+      "bootstrapTools": [
+        "read",
+        "grep",
+        "find",
+        "ls",
+        "web_search",
+        "fetch_content",
+        "get_search_content",
+        "source_check"
+      ],
+      "futureWriteScopeRequests": [
+        "extensions/pi861/src/live/team-design/"
+      ],
+      "deliverables": [
+        "团队蓝图",
+        "需求到节点映射",
+        "不可执行项清单"
+      ],
+      "challengeFocus": "先造岗位后找任务、虚构工具、循环依赖、漏交付要求"
+    },
+    {
+      "id": "D4",
+      "slug": "capability-engineer",
+      "title": "模型工具与Skill",
+      "responsibility": "模型能力校准、请求参数、Skill候选试验、工具加载和权限绑定",
+      "main": "alpha-capability-engineer",
+      "shadow": "alpha-capability-engineer-shadow",
+      "skills": [
+        "pi-alpha-core",
+        "pi-alpha-evidence",
+        "pi-alpha-experiment",
+        "pi-alpha-capabilities"
+      ],
+      "bootstrapTools": [
+        "read",
+        "grep",
+        "find",
+        "ls",
+        "web_search",
+        "fetch_content",
+        "get_search_content",
+        "source_check"
+      ],
+      "futureWriteScopeRequests": [
+        "extensions/pi861/src/live/skill-repository.ts",
+        "extensions/pi861/src/live/model-runtime.ts"
+      ],
+      "deliverables": [
+        "能力矩阵",
+        "参数/工具可用证据",
+        "Skill基线比较"
+      ],
+      "challengeFocus": "同模型换别名冒充异模、遗漏推理或预算、工具未加载、依赖与权限漂移"
+    },
+    {
+      "id": "D5",
+      "slug": "evaluator",
+      "title": "测试与效果评估",
+      "responsibility": "确定性检查、故障注入、任务效果基线、误报漏报与盲评",
+      "main": "alpha-evaluator",
+      "shadow": "alpha-evaluator-shadow",
+      "skills": [
+        "pi-alpha-core",
+        "pi-alpha-evidence",
+        "pi-alpha-experiment",
+        "pi-alpha-evaluation"
+      ],
+      "bootstrapTools": [
+        "read",
+        "grep",
+        "find",
+        "ls",
+        "web_search",
+        "fetch_content",
+        "get_search_content",
+        "source_check"
+      ],
+      "futureWriteScopeRequests": [
+        "extensions/pi861/test/",
+        "scripts/"
+      ],
+      "deliverables": [
+        "代表性与反例测试",
+        "版本化运行记录",
+        "含全部成本的比较"
+      ],
+      "challengeFocus": "只有正例、跳过冒充通过、评审污染、选择性报告、把模拟结果当模型能力"
+    },
+    {
+      "id": "D6",
+      "slug": "integration-auditor",
+      "title": "全局验收与争议复核",
+      "responsibility": "跨模块交接、版本一致、缺陷裁决、整体需求和证据审计",
+      "main": "alpha-integration-auditor",
+      "shadow": "alpha-integration-auditor-shadow",
+      "skills": [
+        "pi-alpha-core",
+        "pi-alpha-evidence",
+        "pi-alpha-experiment",
+        "pi-alpha-integration"
+      ],
+      "bootstrapTools": [
+        "read",
+        "grep",
+        "find",
+        "ls",
+        "web_search",
+        "fetch_content",
+        "get_search_content",
+        "source_check"
+      ],
+      "futureWriteScopeRequests": [
+        "docs/pi861/alpha/"
+      ],
+      "deliverables": [
+        "跨流程验收表",
+        "争议分类与复核任务",
+        "剩余风险"
+      ],
+      "challengeFocus": "局部都通过但整体错版、自己评自己、多数投票代替证据、未授权发布"
+    }
+  ],
+  "releaseGates": [
+    "valid-profiles-and-skills",
+    "pinned-provider-registration",
+    "approved-model-pool",
+    "distinct-qualified-models-per-pair",
+    "host-enforced-isolation-and-budget",
+    "paired-admission-and-live-events",
+    "independent-real-model-pilot",
+    "user-task-acceptance"
+  ],
+  "separation": {
+    "otherTeam": "dsh",
+    "readOtherTeamWorkspace": false,
+    "modifyOtherTeam": false,
+    "sharedJudge": "operator-controlled",
+    "selfDeclareWinner": false
+  }
+}

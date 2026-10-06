@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "models": [],
+  "pairs": {
+    "D0": {
+      "main": null,
+      "shadow": null
+    },
+    "D1": {
+      "main": null,
+      "shadow": null
+    },
+    "D2": {
+      "main": null,
+      "shadow": null
+    },
+    "D3": {
+      "main": null,
+      "shadow": null
+    },
+    "D4": {
+      "main": null,
+      "shadow": null
+    },
+    "D5": {
+      "main": null,
+      "shadow": null
+    },
+    "D6": {
+      "main": null,
+      "shadow": null
+    }
+  },
+  "authorization": {
+    "realModelCalls": false,
+    "researchServices": false,
+    "maxTotalCost": null,
+    "currency": null,
+    "maxRequests": null
+  },
+  "note": "模板不含密钥或真实模型。models条目由用户提供id/provider/model/canonicalModelId/capabilities/qualifiedRoles；同一实际模型不同别名不算独立模型。凭据由Pi宿主私有配置管理。"
+}

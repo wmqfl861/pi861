@@ -1,0 +1,67 @@
+name: Pi861 Alpha bootstrap
+
+on:
+  push:
+    branches: ['feat/pi861-runtime-v1-*']
+    paths: ['.pi/alpha/**', '.pi/agents/alpha/**', '.pi/skills/pi-alpha-*/**', '.pi/prompts/alpha.md', 'scripts/*pi861-alpha*', 'docs/pi861/alpha/**', '.github/workflows/pi861-alpha.yml']
+  pull_request:
+    branches: [main, feat/pi861-runtime-v1]
+    paths: ['.pi/alpha/**', '.pi/agents/alpha/**', '.pi/skills/pi-alpha-*/**', '.pi/prompts/alpha.md', 'scripts/*pi861-alpha*', 'docs/pi861/alpha/**', '.github/workflows/pi861-alpha.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pi861-alpha-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      npm_config_ignore_scripts: 'true'
+      npm_config_save_exact: 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24'
+      - name: Prepare isolated source and model catalog
+        run: |
+          mkdir -p .artifacts/pi861-alpha "$RUNNER_TEMP/pi-alpha-home"
+          echo "PI_CODING_AGENT_DIR=$RUNNER_TEMP/pi-alpha-home" >> "$GITHUB_ENV"
+          node scripts/pi861-dev.mjs setup 2>&1 | tee .artifacts/pi861-alpha/setup.log
+      - name: Install the four existing pinned plugins without lifecycle scripts
+        run: |
+          for spec in npm:pi-mcp-adapter@5.0.0 npm:pi-subagents@0.74.0 npm:pi-web-access@0.35.0 npm:pi-hermes-memory@0.9.9; do
+            bash ./pi-test.sh --no-env install --approve -l "$spec"
+          done 2>&1 | tee .artifacts/pi861-alpha/plugin-install.log
+      - name: Validate Alpha configuration and protocol negative cases
+        run: |
+          node scripts/pi861-alpha.mjs check > .artifacts/pi861-alpha/configuration.json
+          node scripts/pi861-alpha.mjs status > .artifacts/pi861-alpha/status.json
+          node --test scripts/pi861-alpha.test.mjs 2>&1 | tee .artifacts/pi861-alpha/tests.log
+          node scripts/pi861-alpha.mjs simulate > .artifacts/pi861-alpha/protocol-simulation.json
+      - name: Check actual pinned Pi profile discovery and child tool registration
+        run: node node_modules/tsx/dist/cli.mjs --tsconfig tsconfig.json scripts/check-pi861-alpha-host.mjs 2>&1 | tee .artifacts/pi861-alpha/host.log
+      - name: Full repository check
+        run: npm run check 2>&1 | tee .artifacts/pi861-alpha/repository-check.log
+      - name: Check tracked source remains unchanged
+        run: |
+          git diff --exit-code
+          git rev-parse HEAD > .artifacts/pi861-alpha/HEAD.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: pi861-alpha-${{ github.sha }}
+          path: .artifacts/pi861-alpha/
+          if-no-files-found: error
+          retention-days: 14

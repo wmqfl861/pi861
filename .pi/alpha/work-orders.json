@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "teamId": "pi-alpha",
+  "status": "bootstrap",
+  "items": [
+    {
+      "id": "A0",
+      "title": "建立配置和离线验证",
+      "owner": "D0",
+      "shadow": "alpha-coordinator-shadow",
+      "status": "bootstrap-configuration-verified",
+      "dependencies": [],
+      "verifiedBy": "current-session; not independent model review"
+    },
+    {
+      "id": "A1",
+      "title": "冻结需求与证据契约",
+      "owner": "D1",
+      "shadow": "alpha-architect-shadow",
+      "status": "planned-not-started",
+      "dependencies": [
+        "A0"
+      ]
+    },
+    {
+      "id": "A2",
+      "title": "研究充分性和实验循环",
+      "owner": "D2",
+      "shadow": "alpha-research-engineer-shadow",
+      "status": "planned-not-started",
+      "dependencies": [
+        "A1"
+      ]
+    },
+    {
+      "id": "A3",
+      "title": "业务团队与流程编译",
+      "owner": "D3",
+      "shadow": "alpha-team-designer-shadow",
+      "status": "planned-not-started",
+      "dependencies": [
+        "A1"
+      ]
+    },
+    {
+      "id": "A4",
+      "title": "模型工具准入和校准",
+      "owner": "D4",
+      "shadow": "alpha-capability-engineer-shadow",
+      "status": "planned-not-started",
+      "dependencies": [
+        "A0"
+      ]
+    },
+    {
+      "id": "A5",
+      "title": "同步主影可信宿主适配",
+      "owner": "D1",
+      "shadow": "alpha-architect-shadow",
+      "status": "planned-not-started",
+      "dependencies": [
+        "A1",
+        "A4"
+      ]
+    },
+    {
+      "id": "A6",
+      "title": "真实任务效果对照",
+      "owner": "D5",
+      "shadow": "alpha-evaluator-shadow",
+      "status": "planned-not-started",
+      "dependencies": [
+        "A2",
+        "A3",
+        "A5"
+      ]
+    },
+    {
+      "id": "A7",
+      "title": "整体和独立验收",
+      "owner": "D6",
+      "shadow": "alpha-integration-auditor-shadow",
+      "status": "planned-not-started",
+      "dependencies": [
+        "A6"
+      ]
+    }
+  ]
+}
